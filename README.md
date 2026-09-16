@@ -28,6 +28,10 @@ To open a local policy:
 ./bin/bpe policy.hcl
 ```
 
+At this stage `bpe` and `bpe <policy.hcl>` print an explicit "not implemented
+yet" message and exit non-zero rather than starting a TUI — see
+[CLI Reference](#cli-reference) below for what each command currently does.
+
 ## Requirements
 
 - Go 1.27
@@ -37,22 +41,73 @@ To open a local policy:
 - Network access to an OpenBao server is required only for remote policy operations
 - Remote operations require an OpenBao token with `list` on `sys/policies/acl`, `read` on `sys/policies/acl/*`, `create` or `update` for policy changes, and `delete` for policy deletion
 
+## CLI Reference
+
+```text
+bpe                                                              Start the interactive editor with an empty policy
+bpe <policy.hcl>                                                 Start the interactive editor, opening a policy file
+bpe validate <policy.hcl>                                        Validate a policy without starting the interactive editor
+bpe format <policy.hcl>                                          Format a policy file
+bpe test <policy.hcl> --path <path> --capability <capability>    Simulate an effective-access check
+bpe help [command]                                                Show help, optionally for one command
+bpe --help / bpe <command> --help                                 Show help
+bpe --version                                                      Show version information
+```
+
+`--path` and `--capability` may appear before or after the policy file. Global
+configuration flags (`--address`, `--token`, `--namespace`, `--ca-cert`,
+`--ca-path`, `--client-cert`, `--client-key`, `--tls-server-name`,
+`--skip-verify`) are accepted anywhere on the command line — see
+[Configuration](#configuration).
+
+**Currently implemented:** argument parsing and validation, `--help`/`help`,
+`bpe <command> --help`, and `--version` all behave as documented above and
+exit `0`.
+
+**Currently scaffolded — not implemented yet:** the interactive editor
+(`bpe` / `bpe <policy.hcl>`), `validate`, `format`, and `test` parse and
+validate their arguments correctly, then report an explicit "not implemented
+yet" message on standard error and exit `3`. None of them silently succeed,
+write a file, or contact OpenBao. Real behavior lands in FSM-11 through
+FSM-18.
+
 ## Configuration
 
-BPE uses OpenBao's established environment variables rather than inventing BPE-specific equivalents:
+BPE uses OpenBao's established environment variables rather than inventing BPE-specific equivalents. Configuration is resolved in this order, highest precedence first:
 
-| Variable | Meaning |
-| --- | --- |
-| `BAO_ADDR` | OpenBao server URL |
-| `BAO_TOKEN` | Authentication token |
-| `BAO_NAMESPACE` | Optional namespace |
-| `BAO_CACERT` | Optional CA certificate |
-| `BAO_CAPATH` | Optional CA certificate directory |
-| `BAO_CLIENT_CERT` | Optional client certificate |
-| `BAO_CLIENT_KEY` | Optional client private key |
-| `BAO_TLS_SERVER_NAME` | Optional TLS server name |
+1. An explicit command-line flag
+2. The corresponding `BAO_*` environment variable
+3. The corresponding `VAULT_*` environment variable, as a fallback
+4. A safe default (empty string, or `false` for `--skip-verify`)
 
-Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back to their corresponding `VAULT_*` variables where OpenBao itself does so.
+An environment variable that is set but empty counts as set at that
+precedence tier — it does not fall through to the next one. This applies
+identically to an explicitly empty flag value.
+
+| Variable | CLI flag | Meaning |
+| --- | --- | --- |
+| `BAO_ADDR` | `--address` | OpenBao server URL |
+| `BAO_TOKEN` | `--token` | Authentication token (never logged, printed, or included in diagnostic output) |
+| `BAO_NAMESPACE` | `--namespace` | Optional namespace |
+| `BAO_CACERT` | `--ca-cert` | Optional CA certificate |
+| `BAO_CAPATH` | `--ca-path` | Optional CA certificate directory |
+| `BAO_CLIENT_CERT` | `--client-cert` | Optional client certificate |
+| `BAO_CLIENT_KEY` | `--client-key` | Optional client private key |
+| `BAO_TLS_SERVER_NAME` | `--tls-server-name` | Optional TLS server name |
+| `BAO_SKIP_VERIFY` | `--skip-verify` | Disable TLS certificate verification (default `false`) |
+
+Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back to their corresponding `VAULT_*` variables. Configuration resolution never reads a persistent BPE configuration file and never contacts OpenBao — no command in this release performs network access.
+
+## Exit Codes
+
+| Code | Meaning | Status |
+| --- | --- | --- |
+| `0` | Successful command, or `--help`/`help`/`--version` output | Active |
+| `1` | Policy validation failure or denied policy test result | Reserved for FSM-11/FSM-17 |
+| `2` | Command-line usage or configuration error | Active |
+| `3` | Operational failure, including a command deliberately not implemented yet | Active |
+| `4` | Concurrent modification or version conflict | Reserved for FSM-16 |
+| `130` | Interrupted by the user (Ctrl+C or SIGTERM) | Active |
 
 ## Common Commands
 
@@ -80,6 +135,10 @@ go vet ./...
 
 # Update dependencies
 go mod tidy
+
+# Show CLI help and version
+go run ./cmd/bpe --help
+go run ./cmd/bpe --version
 ```
 
 ## Repository Layout
@@ -87,14 +146,15 @@ go mod tidy
 ```text
 bao-policy-editor/
 ├── cmd/
-│   └── bpe/                 # main.go — application entry point
+│   └── bpe/                 # main.go, CLI parsing, command dispatch — application entry point
 ├── internal/
 │   ├── tui/                 # Bubble Tea screens, components, and styles
 │   ├── policy/               # UI-independent policy domain model
 │   ├── hclpolicy/            # HCL parsing, validation, and generation
 │   ├── evaluator/             # Matching and effective-access simulation
 │   ├── baoclient/             # OpenBao API integration
-│   └── config/                # Environment and file configuration
+│   ├── config/                # Environment and file configuration
+│   └── apperr/                 # Structured application errors and the exit-code contract
 ├── testdata/
 │   └── policies/              # Valid, invalid, and edge-case HCL fixtures
 ├── docs/                       # human decision-making documents
@@ -109,7 +169,7 @@ bao-policy-editor/
 
 ## How It Works
 
-The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL, while `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API. `config` resolves command-line and environment configuration. This separation allows the parser, evaluator, and client to be tested without running the terminal interface.
+The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL, while `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
 
 ```text
 Local HCL file ─┐
@@ -126,6 +186,7 @@ OpenBao API ─────┘
 
 - Add table-driven tests and HCL fixtures for policy behavior and regressions.
 - Tests must not require access to a live OpenBao server unless explicitly marked as integration tests.
+- CLI argument parsing, configuration precedence, and command dispatch (help/usage/exit codes/cancellation) are covered by table-driven tests in `cmd/bpe` and `internal/config` that call Go functions directly rather than invoking a subprocess. A small number of process-level tests in `cmd/bpe` verify end-to-end exit-code behavior through the compiled binary.
 
 ## Build and Release
 
@@ -142,6 +203,8 @@ See [`RUNBOOK.md`](RUNBOOK.md) for operational procedures.
 ## Troubleshooting
 
 Common connection, TLS, terminal-rendering, logging, and recovery procedures belong in [`RUNBOOK.md`](RUNBOOK.md). Operational guidance there is still under development until those features exist.
+
+**Current limitations:** the interactive editor, HCL parsing, policy validation, formatting, capability testing, file persistence, and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
 
 ## Security
 
