@@ -440,6 +440,66 @@ func TestValidate_CorrectKV2Path_NoWarning(t *testing.T) {
 	}
 }
 
+// --- Fixture regressions: valid.hcl must validate cleanly, and the
+// contradiction it used to contain (before FSM-12 fixed it — see
+// testdata/policies/contradictory_required_parameter.hcl) stays under
+// coverage via its own dedicated negative fixture.
+
+// TestValidate_Fixture_ValidHCL_HasNoErrors guards against valid.hcl
+// regressing back into an unsatisfiable policy. Warnings are fine — the
+// third rule's "sys/*"-adjacent broad-access warning is expected — but
+// no SeverityError diagnostic may ever come out of this fixture.
+func TestValidate_Fixture_ValidHCL_HasNoErrors(t *testing.T) {
+	src := readFixture(t, "valid.hcl")
+	doc, err := Parse("valid.hcl", src)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if doc.HasErrors() {
+		t.Fatalf("HasErrors() = true, want false: %v", doc.Diagnostics)
+	}
+
+	diags := doc.Validate()
+	for _, d := range diags {
+		if d.Severity == SeverityError {
+			t.Errorf("valid.hcl produced a SeverityError diagnostic (warnings are fine, errors are not): %v", d)
+		}
+	}
+}
+
+// TestValidate_Fixture_ContradictoryRequiredParameter preserves the exact
+// case valid.hcl accidentally contained until FSM-12: a required
+// parameter absent from a present allowed_parameters whitelist, with no
+// "*" wildcard. It asserts the specific diagnostic — summary, severity,
+// and the exact reason text — rather than merely "some error exists", so
+// this regression can't silently start passing for the wrong reason.
+func TestValidate_Fixture_ContradictoryRequiredParameter(t *testing.T) {
+	src := readFixture(t, "contradictory_required_parameter.hcl")
+	doc, err := Parse("contradictory_required_parameter.hcl", src)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if doc.HasErrors() {
+		t.Fatalf("HasErrors() = true, want false — this fixture is syntactically valid, only semantically contradictory: %v", doc.Diagnostics)
+	}
+
+	diags := doc.Validate()
+	d, found := findDiagnostic(diags, `requires parameter "owner" that can never be supplied`)
+	if !found {
+		t.Fatalf("no owner-contradiction diagnostic found in %v", diags)
+	}
+	if d.Severity != SeverityError {
+		t.Errorf("Severity = %v, want SeverityError", d.Severity)
+	}
+	if d.Path != "secret/data/team-a/*" {
+		t.Errorf("Path = %q, want the rule's path", d.Path)
+	}
+	wantDetail := `allowed_parameters is set but lists neither "owner" nor a "*" wildcard, so required parameter "owner" can never be supplied`
+	if d.Detail != wantDetail {
+		t.Errorf("Detail = %q, want %q", d.Detail, wantDetail)
+	}
+}
+
 // --- Document.Validate stamps the filename.
 
 func TestDocumentValidate_StampsFilename(t *testing.T) {

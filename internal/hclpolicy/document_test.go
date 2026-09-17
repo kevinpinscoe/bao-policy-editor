@@ -50,8 +50,15 @@ func TestParse_ValidPolicy(t *testing.T) {
 	if len(r0.RequiredParameters) != 1 || r0.RequiredParameters[0] != "owner" {
 		t.Errorf("Rules[0].RequiredParameters = %v", r0.RequiredParameters)
 	}
-	if len(r0.AllowedParameters) != 2 {
-		t.Fatalf("Rules[0].AllowedParameters = %v, want 2 entries", r0.AllowedParameters)
+	// 3 entries as of FSM-12: "owner" = [] was added so the required
+	// "owner" parameter is actually satisfiable (FSM-11's fixture required
+	// it without ever allowing it — a contradiction Validate now catches;
+	// see TestValidate_Fixture_ContradictoryRequiredParameter).
+	if len(r0.AllowedParameters) != 3 {
+		t.Fatalf("Rules[0].AllowedParameters = %v, want 3 entries", r0.AllowedParameters)
+	}
+	if owner, ok := lookupParameter(r0.AllowedParameters, "owner"); !ok || len(owner.Values) != 0 {
+		t.Errorf(`Rules[0].AllowedParameters["owner"] = %v, ok=%v, want an empty-values entry permitting any value`, owner, ok)
 	}
 	if len(r0.DeniedParameters) != 1 || r0.DeniedParameters[0].Name != "root" {
 		t.Errorf("Rules[0].DeniedParameters = %v", r0.DeniedParameters)
