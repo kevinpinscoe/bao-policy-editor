@@ -63,16 +63,16 @@ Or check whether it needs formatting, without writing it — suitable for CI:
 
 See [File writes](#file-writes) for what "in place" guarantees and does not.
 
-At this stage `bpe` and `bpe <policy.hcl>` (opening the interactive editor)
-print an explicit "not implemented yet" message and exit non-zero rather
-than starting a TUI — see [CLI Reference](#cli-reference) below for what
-each command currently does.
+`bpe` with no subcommand opens the [interactive editor](#interactive-editor):
+with a file, on that policy; without one, on an empty policy. Opening a
+file does not modify it.
 
 ## Requirements
 
 - Go 1.27
 - `mise` for the repository-managed development environment
-- A terminal with UTF-8 and ANSI color support
+- A terminal with UTF-8 support. ANSI color is used but not required — see
+  [Terminal behavior](#terminal-behavior)
 - OpenBao is optional; local policy editing and validation do not require a running server
 - Network access to an OpenBao server is required only for remote policy operations
 - Remote operations require an OpenBao token with `list` on `sys/policies/acl`, `read` on `sys/policies/acl/*`, `create` or `update` for policy changes, and `delete` for policy deletion
@@ -96,11 +96,13 @@ may `format`'s `--check`. Global configuration flags (`--address`, `--token`,
 `--tls-server-name`, `--skip-verify`) are accepted anywhere on the command
 line — see [Configuration](#configuration).
 
-**Currently implemented:** argument parsing and validation, `--help`/`help`,
-`bpe <command> --help`, `--version`, `bpe validate <policy.hcl>`,
-`bpe format <policy.hcl> [--check]`, and
-`bpe test <policy.hcl> --path <path> --capability <capability>` all behave
-as documented below.
+**Currently implemented:** every command above. Argument parsing and
+validation, `--help`/`help`, `bpe <command> --help`, `--version`,
+`bpe validate <policy.hcl>`, `bpe format <policy.hcl> [--check]`,
+`bpe test <policy.hcl> --path <path> --capability <capability>`, and the
+interactive editor (`bpe` / `bpe <policy.hcl>`) all behave as documented
+below. OpenBao connectivity is not implemented — no command in this
+release contacts a server.
 
 `bpe validate` reads and parses the file, then runs semantic checks —
 unknown capabilities, `deny` combined with other capabilities, duplicate
@@ -149,18 +151,128 @@ formatted, `1` would reformat), and is the only mode that follows a
 symlink; see [File writes](#file-writes) for what writing "in place"
 does and does not guarantee.
 
-**Currently scaffolded — not implemented yet:** the interactive editor
-(`bpe` / `bpe <policy.hcl>`) parses and validates its arguments
-correctly, then reports an explicit "not implemented yet" message on
-standard error and exits `3`. It does not silently succeed, write a
-file, or contact OpenBao. Real behavior lands in FSM-15 through FSM-18.
+`bpe` and `bpe <policy.hcl>` open the interactive editor — see
+[Interactive editor](#interactive-editor) for what it does, how it edits,
+and what it refuses to do.
+
+### Interactive editor
+
+`bpe` opens an empty policy; `bpe <policy.hcl>` opens that file. Opening a
+file is a read — nothing is written and the file's modification time is
+untouched.
+
+**It edits the file you opened rather than regenerating it.** Every change
+is applied to the parsed HCL token stream, so a comment, an attribute BPE
+does not model, an unsupported nested block, and the file's own formatting
+all survive an edit untouched. Only the attribute you actually changed is
+rewritten. Opening a rule and accepting the form without changing anything
+produces a byte-identical file.
+
+The consequence worth knowing: a value BPE cannot reproduce faithfully is
+not rewritten at all. A variable reference, an interpolated string, a
+heredoc, or an expression carrying its own comment makes that **one field**
+read-only, with the reason shown beside it; the rest of the rule, and the
+rest of the file, stay editable. A capability BPE does not recognize has
+no checkbox, is never dropped, and is named on screen so you know it is
+there.
+
+A file whose HCL does not parse opens **read-only**, with its diagnostics
+on display. It can be browsed, previewed, and inspected, but not edited —
+BPE will not rewrite a file it could not fully read.
+
+#### Screens
+
+| Key | Screen |
+| --- | --- |
+| *(start)* | Rule list and the selected rule's details |
+| `enter` / `a` | Edit or add a rule — path, all nine capabilities, comment, and an **advanced** section for expiration and the three parameter constraints |
+| `p` | HCL preview — the document exactly as it would be written |
+| `g` | Validation diagnostics, with severity and source line |
+| `t` | Effective-access test, run against the policy including unsaved edits |
+| `s` | Save review — a diff of what is about to be written against what was read |
+| `?` | Full key reference |
+
+Every screen lists the keys it accepts in a footer. On a narrow terminal
+the footer abbreviates its labels rather than dropping entries, so every
+key stays visible.
+
+#### Keyboard and mouse controls
+
+| Key | Does |
+| --- | --- |
+| `↑` / `↓` | Move the selection (`j` / `k` also work) |
+| `tab` / `shift+tab` | Move between fields in a form |
+| `pgup` / `pgdn`, `home` / `end` | Page or jump through a long view |
+| `enter` | Open the selected rule, or the highlighted field |
+| `space` | Toggle the highlighted capability |
+| `esc` | Go back, or cancel the current form |
+| `a` | Add a rule |
+| `d` | Duplicate the selected rule, comments and all |
+| `x` | Remove the selected rule |
+| `ctrl+d` | Unset a field in the rule form — removes the attribute rather than emptying it |
+| `ctrl+s` | Apply the form, or write the file from the review screen |
+| `q` / `ctrl+c` | Quit, with confirmation when there are unsaved changes |
+
+Mouse: click a rule to select it, and use the wheel to scroll a long view.
+Everything the mouse does has a key that does the same thing — mouse input
+is never required.
+
+#### Absent, empty, and populated are three different things
+
+`comment = ""` and no `comment` attribute are different files, and BPE
+keeps them apart. An optional field shows `(not set)` when the attribute
+is absent and `"" (set, but empty)` when it is present and empty. `ctrl+d`
+removes the attribute; clearing its text does not.
+
+The same distinction applies to parameter constraints, where an empty
+value list is meaningful to OpenBao rather than merely blank: under
+`allowed_parameters` it permits any value for that parameter, and under
+`denied_parameters` it forbids the parameter entirely. The parameter
+subform says so on screen.
+
+#### Saving
+
+`s` opens the save review: a line-level diff of the document against the
+file as it was read. Nothing is written until `ctrl+s` on that screen, so
+anything that would disappear — a comment removed along with the rule it
+documented, for instance — is visible first.
+
+Writing goes through the same `internal/fileio` path `bpe format` uses,
+with the same guarantees and the same caveats (see [File writes](#file-writes)).
+If the file changed on disk since it was read, the write is **refused**:
+your in-memory edits are kept, and the conflict dialog offers to show what
+changed on disk before you decide between reloading and cancelling.
+
+Removing a rule takes that rule's own leading comments with it, and the
+confirmation says so and shows them. An orphaned comment left above the
+*next* rule would read as documentation for that rule, which in an
+access-control file is worse than an untidy leftover.
+
+A document started with bare `bpe` has no file yet. Saving it asks for a
+path, and BPE will create that file but **will not replace an existing
+one** — it has not read that file, so it cannot tell an earlier version of
+this policy from something unrelated.
+
+#### Terminal behavior
+
+- The editor runs full-window (alternate screen) and restores the terminal
+  on a normal quit, on an interrupt, and on a recovered panic.
+- `SIGINT` / `SIGTERM` exit `130`. `ctrl+c` typed in the editor behaves
+  like `q`: it asks before discarding unsaved work.
+- No state is communicated by color alone. Every colored thing also carries
+  a word or a glyph — `modified`, `read-only`, `[x]`, `DENY`, `error` — so
+  the interface reads correctly with `NO_COLOR` set. Colors are terminal
+  palette indices rather than fixed hex values, so they follow your own
+  theme on a light or a dark background.
+- The layout stacks the rule list above the details panel below 80
+  columns, and no screen emits a line wider than the terminal at any width.
 
 ### File writes
 
-`bpe format` is currently the only command that writes to a local file;
-the TUI's save (FSM-15) and any future local side of a remote edit
-(FSM-16) will reuse the same `internal/fileio` package rather than
-duplicating this logic.
+`bpe format` and the interactive editor's save are the two things that
+write to a local file, and both go through the same `internal/fileio`
+package; any future local side of a remote edit (FSM-16) will reuse it too
+rather than duplicating this logic.
 
 - **Atomic.** A write goes to a temporary file in the same directory,
   is `fsync`ed, has its permissions set, and is renamed over the
@@ -171,7 +283,7 @@ duplicating this logic.
   are carried onto the new content. Extended attributes and ACLs are
   **not** preserved.
 - **Conflict-detecting, not a true compare-and-swap.** Before writing,
-  `bpe format` re-checks the file's on-disk state against a snapshot
+  a write re-checks the file's on-disk state against a snapshot
   taken when it was read — content hash and file identity, not just size
   and modification time, so a same-size edit within one mtime tick, a
   deletion, a replacement, or a permission change are all caught (exit
@@ -184,8 +296,8 @@ duplicating this logic.
   both of BPE's supported platforms (Linux, macOS), and the containing
   directory is `fsync`ed afterward where the platform supports it, so
   the replacement is durable across a crash, not merely atomic in
-  memory. If that post-rename step fails, `bpe format` reports that the
-  file **was** replaced — never that nothing happened.
+  memory. If that post-rename step fails, BPE reports that the file
+  **was** replaced — never that nothing happened.
 - **Symlinks and hard links.** Writing in place refuses a symlink
   outright (exit `3`) rather than following it or replacing the link
   itself — `--check` may still follow one, since it never writes.
@@ -266,8 +378,8 @@ Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back 
 | `0` | Successful command, or `--help`/`help`/`--version` output | Active |
 | `1` | `validate`: a validation failure. `test`: a denied result, or a policy it cannot trust enough to simulate against (unsupported content or decode errors). `format`: a genuine HCL syntax error, or — with `--check` only — the file would be reformatted. | Active for `validate` (FSM-12), `test` (FSM-13), and `format` (FSM-14) — corrected from an earlier, mistaken "reserved for FSM-17" note; FSM-17 is TUI/remote integration, unrelated to this exit code |
 | `2` | Command-line usage or configuration error | Active |
-| `3` | Operational failure, including a command deliberately not implemented yet, a policy file that could not be read, a `test` result `bpe` cannot reduce to a trustworthy decision from path and capability alone (see [Evaluation limits](#evaluation-limits)), or `format` refusing to write through a symlink or a detected hard-linked file | Active |
-| `4` | A detected write conflict: for `format`, the local file changed on disk between being read and being written (see [File writes](#file-writes)) | Active for `format` (FSM-14); also reserved for a future remote OpenBao version/CAS conflict (FSM-16) — the same category of problem at a different layer |
+| `3` | Operational failure: a policy file that could not be read, a `test` result `bpe` cannot reduce to a trustworthy decision from path and capability alone (see [Evaluation limits](#evaluation-limits)), `format` refusing to write through a symlink or a detected hard-linked file, or the interactive editor failing to start | Active |
+| `4` | A detected write conflict: the local file changed on disk between being read and being written (see [File writes](#file-writes)). The interactive editor reports this on screen and keeps your edits rather than exiting | Active for `format` (FSM-14); also reserved for a future remote OpenBao version/CAS conflict (FSM-16) — the same category of problem at a different layer |
 | `130` | Interrupted by the user (Ctrl+C or SIGTERM) | Active |
 
 ## Common Commands
@@ -276,10 +388,10 @@ Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back 
 # Install the configured toolchain
 mise install
 
-# Run from source
+# Open the interactive editor on an empty policy
 go run ./cmd/bpe
 
-# Open a policy
+# Open the interactive editor on a policy file
 go run ./cmd/bpe policy.hcl
 
 # Build
@@ -313,9 +425,9 @@ bao-policy-editor/
 ├── cmd/
 │   └── bpe/                 # main.go, CLI parsing, command dispatch — application entry point
 ├── internal/
-│   ├── tui/                 # Bubble Tea screens, components, and styles
+│   ├── tui/                 # Bubble Tea v2 interactive editor — screens, forms, styles
 │   ├── policy/               # UI-independent policy domain model
-│   ├── hclpolicy/            # HCL parsing, validation, and generation
+│   ├── hclpolicy/            # HCL parsing, validation, generation, and surgical editing
 │   ├── evaluator/             # Matching and effective-access simulation
 │   ├── baoclient/             # OpenBao API integration
 │   ├── config/                # Environment and file configuration
@@ -335,7 +447,7 @@ bao-policy-editor/
 
 ## How It Works
 
-The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL, while `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API. `fileio` reads a local file together with a snapshot of its on-disk state and later replaces it only if that state has not changed — the shared local-persistence primitive `bpe format` uses today and the TUI's save and `baoclient`'s local side will reuse later; it is local-filesystem only; remote OpenBao CAS handling stays `baoclient`'s concern. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), help text (`help.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
+The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL — and edits HCL in place, applying one attribute, label, or block change to the parsed token stream so that everything it was not asked to change survives byte for byte; the TUI is an editable projection of that document rather than a second copy of it. `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API. `fileio` reads a local file together with a snapshot of its on-disk state and later replaces it only if that state has not changed — the shared local-persistence primitive `bpe format` uses today and the TUI's save and `baoclient`'s local side will reuse later; it is local-filesystem only; remote OpenBao CAS handling stays `baoclient`'s concern. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), help text (`help.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
 
 ```text
 Local HCL file ─┐
@@ -354,6 +466,9 @@ OpenBao API ─────┘
 - Tests must not require access to a live OpenBao server unless explicitly marked as integration tests.
 - CLI argument parsing, configuration precedence, and command dispatch (help/usage/exit codes/cancellation) are covered by table-driven tests in `cmd/bpe` and `internal/config` that call Go functions directly rather than invoking a subprocess. A small number of process-level tests in `cmd/bpe` verify end-to-end exit-code behavior through the compiled binary.
 - `internal/fileio`'s atomic write, permission preservation, and conflict detection (content change, deletion, replacement, permission change) are covered by table-driven tests using `t.TempDir()`; none touch a real user file.
+- `internal/hclpolicy`'s editing layer carries losslessness tests: a no-op open and close, comments before, inside and after a block, unknown top-level and in-block content, duplicate path blocks, expression-valued attributes, and each of rename, capability toggle, add, duplicate and remove. Each asserts on the resulting bytes, because "nothing was lost" is a statement about the file rather than about the domain model.
+- `internal/tui` is tested by driving the root model's `Update` with synthesized key presses, exactly as the runtime would: navigation, applying and cancelling a form, add, duplicate, remove-with-confirmation, quit-with-unsaved-changes, the save review, an external-change conflict with the edits retained, and a read-only document refusing every editing action. No test needs a TTY, and none touches a file outside its own `t.TempDir()`.
+- Every screen is rendered at 40, 60 and 100 columns and asserted not to emit a line wider than the terminal.
 
 ## Build and Release
 
@@ -371,7 +486,13 @@ See [`RUNBOOK.md`](RUNBOOK.md) for operational procedures.
 
 Common connection, TLS, terminal-rendering, logging, and recovery procedures belong in [`RUNBOOK.md`](RUNBOOK.md). Operational guidance there is still under development until those features exist.
 
-**Current limitations:** the interactive editor and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), effective-access simulation (FSM-13, `bpe test`), and safe local-file formatting and persistence (FSM-14, `bpe format`, `internal/fileio`) are implemented — `bpe test` with the scope limits in [Evaluation limits](#evaluation-limits), and `bpe format`'s writes with the guarantees and caveats in [File writes](#file-writes). Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
+**Current limitations:** OpenBao connectivity is not implemented — no command in this release contacts a server, and the `BAO_*`/`VAULT_*` configuration is resolved but unused. HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), effective-access simulation (FSM-13, `bpe test`), safe local-file formatting and persistence (FSM-14, `bpe format`, `internal/fileio`), and the interactive editor (FSM-15) are implemented — `bpe test` with the scope limits in [Evaluation limits](#evaluation-limits), and local writes with the guarantees and caveats in [File writes](#file-writes).
+
+Three limits of the editor worth knowing before you meet them:
+
+- A field whose value is not a plain literal is read-only, with the reason shown. That is deliberate: rewriting it would replace the expression with whatever it happened to evaluate to.
+- The effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, for the same reason `bpe test` does — the decoded policy would be only part of what OpenBao enforces. The diagnostics screen names what.
+- A duplicated rule is appended at the end of the file rather than inserted after the original, because inserting mid-file would mean re-emitting every block after it.
 
 ## Security
 
