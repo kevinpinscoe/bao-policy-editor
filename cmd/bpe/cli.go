@@ -5,6 +5,7 @@ import (
 
 	"github.com/kevinpinscoe/bao-policy-editor/internal/apperr"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/config"
+	"github.com/kevinpinscoe/bao-policy-editor/internal/policy"
 )
 
 // Kind identifies which command an invocation resolved to. Command
@@ -181,6 +182,14 @@ func flagsFromValues(values map[string]string) config.Flags {
 	return f
 }
 
+func knownCapabilitiesList() string {
+	names := make([]string, len(policy.Capabilities))
+	for i, c := range policy.Capabilities {
+		names[i] = string(c)
+	}
+	return strings.Join(names, ", ")
+}
+
 func hasHelpFlag(args []string) bool {
 	for _, tok := range args {
 		if tok == "-h" || tok == "--help" {
@@ -316,6 +325,9 @@ func parseTestSubcommand(args []string, cfgFlags config.Flags) (*Command, error)
 	capability := values["capability"]
 	if capability == "" {
 		return nil, apperr.Usage("missing required flag: --capability")
+	}
+	if !policy.Capability(capability).Known() {
+		return nil, apperr.Usagef("unknown capability: %s (known capabilities: %s)", capability, knownCapabilitiesList())
 	}
 
 	return &Command{

@@ -38,6 +38,17 @@ This prints every diagnostic found — errors and warnings alike, each
 labeled — and exits `0` if there are no errors (warnings alone do not fail
 validation) or `1` if there are. See [Exit Codes](#exit-codes).
 
+To simulate an effective-access check:
+
+```bash
+./bin/bpe test policy.hcl --path secret/data/team-a/example --capability read
+```
+
+This prints a structured explanation of the decision and exits `0` if
+access is allowed, `1` if it is denied. See
+[Evaluation limits](#evaluation-limits) for what it deliberately does not
+attempt, and [Exit Codes](#exit-codes) for the full contract.
+
 At this stage `bpe` and `bpe <policy.hcl>` (opening the interactive editor)
 print an explicit "not implemented yet" message and exit non-zero rather
 than starting a TUI — see [CLI Reference](#cli-reference) below for what
@@ -72,8 +83,9 @@ configuration flags (`--address`, `--token`, `--namespace`, `--ca-cert`,
 [Configuration](#configuration).
 
 **Currently implemented:** argument parsing and validation, `--help`/`help`,
-`bpe <command> --help`, `--version`, and `bpe validate <policy.hcl>` all behave
-as documented above.
+`bpe <command> --help`, `--version`, `bpe validate <policy.hcl>`, and
+`bpe test <policy.hcl> --path <path> --capability <capability>` all behave
+as documented below.
 
 `bpe validate` reads and parses the file, then runs semantic checks —
 unknown capabilities, `deny` combined with other capabilities, duplicate
@@ -90,11 +102,65 @@ a partial overlap that still leaves a valid value is never reported).
 Every diagnostic is printed with its severity; warnings never fail
 validation. It performs no write and never contacts OpenBao.
 
+`bpe test` reads and parses the file, then simulates an effective-access
+check against `internal/evaluator`'s OpenBao-compatible matcher: exact,
+suffix-glob (`*`), and single-segment (`+`) path matching; default deny;
+explicit `deny` precedence; capability union and per-capability source
+tracking across policies; OpenBao's own 5-rule wildcard priority
+comparator; and `list`/`scan`'s 4-stage lookup fallback (see
+[Evaluation limits](#evaluation-limits) below for what it does not
+attempt). It prints a structured, human-readable explanation — the
+requested path and capability, the result, which stage and pattern
+decided it, which policy granted or denied it, and any competing patterns
+that lost and why — then exits `0` for an allowed request or `1` for a
+denied one. `--capability` is validated against OpenBao's known
+capabilities before the file is even read (an unknown value is a usage
+error, exit `2`). It performs no write and never contacts OpenBao.
+
 **Currently scaffolded — not implemented yet:** the interactive editor
-(`bpe` / `bpe <policy.hcl>`), `format`, and `test` parse and validate their
+(`bpe` / `bpe <policy.hcl>`) and `format` parse and validate their
 arguments correctly, then report an explicit "not implemented yet" message
-on standard error and exit `3`. None of them silently succeed, write a
-file, or contact OpenBao. Real behavior lands in FSM-13 through FSM-18.
+on standard error and exit `3`. Neither silently succeeds, writes a
+file, or contacts OpenBao. Real behavior lands in FSM-14 through FSM-18.
+
+### Evaluation limits
+
+`bpe test` answers "does this path and capability match, and does the
+winning rule grant it?" — it is not a full request simulator. Three kinds
+of OpenBao behavior it does not attempt, by design:
+
+- **Request parameters.** `bpe test` supplies only a path and a
+  capability, never concrete request data. If the winning rule carries
+  `required_parameters`, `allowed_parameters`, or `denied_parameters`,
+  whether a real request would satisfy them depends on values `bpe test`
+  is never given — it refuses to guess, reporting `INCOMPLETE` and
+  exiting `3` rather than printing a misleading `ALLOWED`.
+- **Identity templates.** BPE's domain model (from FSM-11) decodes a
+  path label as a literal string; it does not resolve OpenBao identity
+  templates (`{{identity.entity.id}}` and similar). A winning rule whose
+  pattern looks templated is also reported as `INCOMPLETE` rather than
+  matched against its literal, unresolved template syntax.
+- **Content FSM-11 cannot decode.** If the file contains a block or
+  attribute BPE's domain model has no field for, `bpe test` refuses to
+  simulate against it at all — the decoded policy would be an incomplete
+  picture of what OpenBao would actually enforce. It prints the
+  raw parse diagnostics (so unsupported content is never silently
+  dropped on the way to a decision) and exits `1`, the same as any other
+  policy-level problem.
+
+None of these are silently ignored in favor of a confident answer — see
+[Exit Codes](#exit-codes).
+
+### Expiration is a snapshot, not live
+
+A rule's `expiration` is evaluated once, at the moment `bpe test` reads
+the file — every invocation uses the current time. The compiled
+evaluator is a snapshot: an expired rule is excluded entirely, as if it
+had never been written, and that exclusion does not update itself as
+time passes within a single run. Running `bpe test` again later, against
+a rule whose expiration has since passed, correctly excludes it on that
+later run — but nothing about a single invocation is live or
+re-evaluated mid-command.
 
 ## Configuration
 
@@ -128,9 +194,9 @@ Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back 
 | Code | Meaning | Status |
 | --- | --- | --- |
 | `0` | Successful command, or `--help`/`help`/`--version` output | Active |
-| `1` | Policy validation failure or denied policy test result | Active for `validate` (FSM-12); reserved for `test`'s denied result (FSM-17) |
+| `1` | Policy validation failure, a denied `test` result, or a policy `test` cannot trust enough to simulate against (unsupported content or decode errors) | Active for `validate` (FSM-12) and `test` (FSM-13) — corrected from an earlier, mistaken "reserved for FSM-17" note; FSM-17 is TUI/remote integration, unrelated to this exit code |
 | `2` | Command-line usage or configuration error | Active |
-| `3` | Operational failure, including a command deliberately not implemented yet, or a policy file that could not be read | Active |
+| `3` | Operational failure, including a command deliberately not implemented yet, a policy file that could not be read, or a `test` result `bpe` cannot reduce to a trustworthy decision from path and capability alone (see [Evaluation limits](#evaluation-limits)) | Active |
 | `4` | Concurrent modification or version conflict | Reserved for FSM-16 |
 | `130` | Interrupted by the user (Ctrl+C or SIGTERM) | Active |
 
@@ -229,7 +295,7 @@ See [`RUNBOOK.md`](RUNBOOK.md) for operational procedures.
 
 Common connection, TLS, terminal-rendering, logging, and recovery procedures belong in [`RUNBOOK.md`](RUNBOOK.md). Operational guidance there is still under development until those features exist.
 
-**Current limitations:** the interactive editor, formatting, capability testing, file persistence, and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). HCL parsing (FSM-11) and policy validation (FSM-12) are implemented and reachable through `bpe validate`. Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
+**Current limitations:** the interactive editor, formatting, file persistence, and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), and effective-access simulation (FSM-13, `bpe test`) are implemented — the latter with the scope limits in [Evaluation limits](#evaluation-limits). Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
 
 ## Security
 

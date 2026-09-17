@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/kevinpinscoe/bao-policy-editor/internal/apperr"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/config"
+	"github.com/kevinpinscoe/bao-policy-editor/internal/evaluator"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/hclpolicy"
+	"github.com/kevinpinscoe/bao-policy-editor/internal/policy"
 )
 
 // Execute ties argument parsing, configuration resolution, and command
@@ -80,7 +84,7 @@ func dispatchCommand(ctx context.Context, cmd *Command, cfg config.Config, stdin
 	case KindFormat:
 		return apperr.NotImplemented("policy formatting")
 	case KindTest:
-		return apperr.NotImplemented("policy capability testing")
+		return runTest(cmd.PolicyFile, cmd.TestPath, cmd.TestCapability, stdout)
 	default:
 		return apperr.Newf(apperr.ExitOperational, "internal error: unhandled command kind %d", cmd.Kind)
 	}
@@ -132,6 +136,85 @@ func runValidate(policyFile string, stdout io.Writer) error {
 
 	if hasError {
 		return apperr.New(apperr.ExitPolicyIssue, "policy validation failed")
+	}
+	return nil
+}
+
+// runTest implements
+// `bpe test <policy.hcl> --path <path> --capability <capability>`: read
+// and parse the file, compile it into an internal/evaluator.Evaluator,
+// simulate the check, print the structured explanation, and map the
+// result to the documented exit-code contract. It performs no write and
+// contacts no OpenBao server.
+//
+// --capability is already validated against policy.Capabilities by
+// ParseArgs (cli.go) before dispatch ever runs, so an unknown capability
+// never reaches here — that is a usage error (exit 2), not a policy or
+// evaluation problem.
+//
+// Three distinct kinds of failure below map to three different exit
+// codes, deliberately not collapsed into one (Kevin's instruction,
+// 2026-09-17):
+//
+//   - The policy file itself cannot be trusted — decode errors, or
+//     content FSM-11 could not represent at all (doc.Unsupported) — is
+//     apperr.ExitPolicyIssue (1): the problem is the policy, not bpe's
+//     ability to reason about it.
+//   - internal/evaluator.Compile rejects the decoded policy outright
+//     (an unknown capability or a malformed "+*" pattern) is also
+//     ExitPolicyIssue (1), for the same reason.
+//   - The evaluator finds a winning rule but cannot reduce it to a
+//     trustworthy decision (evaluator.ErrIncompleteEvaluation — a
+//     parameter-constrained or identity-templated winning rule) is
+//     apperr.ExitOperational (3): the policy may well be fine, bpe test
+//     simply cannot answer with only a path and a capability.
+//
+// A real, confident deny is ExitPolicyIssue (1); a real, confident allow
+// is ExitSuccess (0).
+func runTest(policyFile, testPath, testCapability string, stdout io.Writer) error {
+	src, err := os.ReadFile(policyFile)
+	if err != nil {
+		return apperr.Wrap(apperr.ExitOperational, "failed to read policy file", err).WithDetail(policyFile)
+	}
+
+	doc, err := hclpolicy.Parse(policyFile, src)
+	if err != nil {
+		return apperr.Wrap(apperr.ExitOperational, "failed to parse policy file", err).WithDetail(policyFile)
+	}
+
+	// bpe test needs a complete, trustworthy domain model to simulate
+	// against — unlike bpe validate, which can still usefully report
+	// semantic findings around content it could not fully decode. Keep
+	// the raw diagnostics visible here too, so unsupported content is
+	// never silently dropped on the way to a decision the CLI cannot
+	// actually stand behind (Kevin's instruction, 2026-09-17).
+	if doc.HasErrors() || doc.Unsupported {
+		for _, d := range doc.Diagnostics {
+			fmt.Fprintln(stdout, d.String())
+		}
+		return apperr.New(apperr.ExitPolicyIssue, "policy file has errors or content bpe cannot fully represent; cannot simulate access against it").WithDetail(policyFile)
+	}
+
+	ev, err := evaluator.Compile([]evaluator.NamedPolicy{{
+		Source: evaluator.Source{Name: policyFile},
+		Policy: doc.Policy,
+	}}, time.Now())
+	if err != nil {
+		return apperr.Wrap(apperr.ExitPolicyIssue, "policy is invalid", err).WithDetail(policyFile)
+	}
+
+	decision, evalErr := ev.Evaluate(testPath, policy.Capability(testCapability))
+	fmt.Fprintln(stdout, decision.Explain())
+
+	if evalErr != nil {
+		if errors.Is(evalErr, evaluator.ErrIncompleteEvaluation) {
+			return apperr.Wrap(apperr.ExitOperational, "cannot determine a trustworthy access decision", evalErr)
+		}
+		return apperr.Wrap(apperr.ExitOperational, "evaluation failed", evalErr)
+	}
+
+	if !decision.Allowed {
+		return apperr.New(apperr.ExitPolicyIssue, "access denied")
 	}
 	return nil
 }
