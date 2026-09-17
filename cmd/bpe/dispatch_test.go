@@ -76,24 +76,23 @@ func TestExecute_UsageErrorWritesToStderr(t *testing.T) {
 	}
 }
 
-func TestExecute_UnimplementedReturnsOperationalExitCode(t *testing.T) {
-	cases := [][]string{
-		nil,
-		{"policy.hcl"},
+// TestExecute_EditorReportsAnUnreadableFile covers the one branch of the
+// interactive editor reachable without a terminal: it fails before the
+// Bubble Tea program starts, so it can be asserted on here rather than in
+// internal/tui. The editor's own behavior is tested at the model level in
+// internal/tui, where Update and View are driven directly and no TTY is
+// involved.
+func TestExecute_EditorReportsAnUnreadableFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.hcl")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{missing}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitOperational) {
+		t.Errorf("exit code = %d, want %d", code, apperr.ExitOperational)
 	}
-
-	for _, args := range cases {
-		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := Execute(context.Background(), args, nil, &stdout, &stderr, noEnv)
-
-			if code != int(apperr.ExitOperational) {
-				t.Errorf("exit code = %d, want %d", code, apperr.ExitOperational)
-			}
-			if !strings.Contains(stderr.String(), "not implemented yet") {
-				t.Errorf("stderr = %q, want it to say plainly that the feature is not implemented", stderr.String())
-			}
-		})
+	if !strings.Contains(stderr.String(), "failed to open policy file") {
+		t.Errorf("stderr = %q, want it to name the failure", stderr.String())
 	}
 }
 

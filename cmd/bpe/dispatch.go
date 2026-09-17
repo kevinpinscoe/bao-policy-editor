@@ -17,6 +17,7 @@ import (
 	"github.com/kevinpinscoe/bao-policy-editor/internal/fileio"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/hclpolicy"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/policy"
+	"github.com/kevinpinscoe/bao-policy-editor/internal/tui"
 )
 
 // Execute ties argument parsing, configuration resolution, and command
@@ -65,13 +66,12 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	return int(apperr.ExitSuccess)
 }
 
-// dispatchCommand performs (or, for a command not yet built, explicitly
-// declines to perform) the action a parsed Command names. Every branch
-// either does real, verified work or returns apperr.NotImplemented — never
-// a false success. cfg and stdin are threaded through for the commands
-// that will need them starting with FSM-16 (OpenBao connectivity); cfg is
-// not read yet. stdout is read as of FSM-12 (KindValidate), FSM-13
-// (KindTest), and FSM-14 (KindFormat).
+// dispatchCommand performs the action a parsed Command names. Every
+// branch does real, verified work — never a false success. cfg is
+// threaded through for the OpenBao connectivity landing in FSM-16 and is
+// not read yet. stdout is read by KindValidate (FSM-12), KindTest
+// (FSM-13), and KindFormat (FSM-14); KindDefault (FSM-15) takes both
+// stdin and stdout, since the interactive editor runs on them.
 func dispatchCommand(ctx context.Context, cmd *Command, cfg config.Config, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return apperr.Interrupted()
@@ -79,10 +79,7 @@ func dispatchCommand(ctx context.Context, cmd *Command, cfg config.Config, stdin
 
 	switch cmd.Kind {
 	case KindDefault:
-		if cmd.PolicyFile == "" {
-			return apperr.NotImplemented("the interactive policy editor")
-		}
-		return apperr.NotImplemented("opening a policy file in the interactive editor")
+		return tui.Run(ctx, tui.Options{PolicyFile: cmd.PolicyFile, Input: stdin, Output: stdout})
 	case KindValidate:
 		return runValidate(cmd.PolicyFile, stdout)
 	case KindFormat:
