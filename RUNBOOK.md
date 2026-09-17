@@ -14,20 +14,20 @@ source_path: /home/kinscoe/Projects/public/bao-policy-editor/RUNBOOK.md
 
 ## Metadata
 
-| Field                 | Value                                                                  |
-| --------------------- | ---------------------------------------------------------------------- |
-| **Owner**             | Kevin Inscoe                                                           |
-| **Last Updated**      | 2026-09-17                                                             |
-| **Last Tested**       | 2026-09-17 — build, CLI, `validate`, `test`, and interruption verified |
-| **Expected Duration** | N/A                                                                    |
-| **Risk Level**        | Medium                                                                 |
-| **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor>                    |
+| Field                 | Value                                                                            |
+| --------------------- | -------------------------------------------------------------------------------- |
+| **Owner**             | Kevin Inscoe                                                                     |
+| **Last Updated**      | 2026-09-17                                                                       |
+| **Last Tested**       | 2026-09-17 — build, CLI, `validate`, `format`, `test`, and interruption verified |
+| **Expected Duration** | N/A                                                                              |
+| **Risk Level**        | Medium                                                                           |
+| **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor>                              |
 
 ---
 
 ## Purpose
 
-This runbook covers how to build, run, validate a policy with, simulate an effective-access check against, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — plus HCL parsing, semantic policy validation (`bpe validate`), and effective-access simulation (`bpe test`); every other command still parses its arguments correctly and reports "not implemented yet", or shows help/version output. This document is intentionally minimal and will grow section by section as real features land. Connection handling, TLS, recovery, and policy-conflict procedures are **not documented here yet** because those features do not exist yet; documenting them now would describe behavior that doesn't exist.
+This runbook covers how to build, run, validate a policy with, format a policy file with, simulate an effective-access check against, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — plus HCL parsing, semantic policy validation (`bpe validate`), safe local-file formatting and persistence (`bpe format`, `internal/fileio`), and effective-access simulation (`bpe test`); the interactive editor still parses its arguments correctly and reports "not implemented yet", or shows help/version output. This document is intentionally minimal and will grow section by section as real features land. Connection handling, TLS, and remote-policy-conflict procedures are **not documented here yet** because those features do not exist yet; documenting them now would describe behavior that doesn't exist. Local-file conflict handling (a policy file that changed on disk since it was read) is documented below, in Step 6.
 
 ---
 
@@ -158,6 +158,50 @@ were both supplied.
 
 ---
 
+### Step 6 — Format a policy, and recover from a write conflict
+
+**Why:** confirms `bpe format` canonicalizes HCL formatting safely — refusing only on a
+genuine syntax error, never on semantic content it can't fully represent — and that a
+policy file changed on disk since it was read is detected rather than silently overwritten.
+
+```bash
+cat > /tmp/bpe-format-demo.hcl <<'EOF'
+path   "secret/data/example"    {
+capabilities=["read"]
+expiration="not-a-timestamp"
+}
+EOF
+./bin/bpe format /tmp/bpe-format-demo.hcl --check
+./bin/bpe format /tmp/bpe-format-demo.hcl
+cat /tmp/bpe-format-demo.hcl
+./bin/bpe format /tmp/bpe-format-demo.hcl --check
+```
+
+**Expected output:** the first `--check` reports `not formatted` and exits `1` (the
+inconsistent spacing above is not canonical). The plain `format` reports `formatted`, exits
+`0`, and rewrites the file to canonical spacing and indentation — the
+`expiration = "not-a-timestamp"` line is still present afterward, unchanged in meaning: a
+decode-time error (this timestamp is not RFC 3339) never blocks or loses content, only a
+genuine HCL syntax error does
+(`./bin/bpe format testdata/policies/invalid_syntax.hcl` demonstrates that refusal, exit `1`,
+file untouched). The second `--check` reports `already formatted` and exits `0`.
+
+To see the write-conflict refusal (exit `4`):
+
+```bash
+cp testdata/policies/valid.hcl /tmp/bpe-conflict-demo.hcl
+# In one terminal, pause bpe format after it has read the file but
+# before it writes — not reproducible as a single copy-paste command,
+# since the window is intentionally narrow (see README.md's File
+# writes). The reliable way to exercise this is internal/fileio's own
+# test suite: go test ./internal/fileio/... -run TestReplace_ConflictDetection -v
+```
+
+**If this fails:** confirm the binary was rebuilt (`go build -o ./bin/bpe ./cmd/bpe`), and
+that `/tmp/bpe-format-demo.hcl` is writable.
+
+---
+
 ## Credential Handling
 
 `BAO_TOKEN` and any other `BAO_*` credential-bearing environment variables must never appear in logs, diagnostic output, terminal screenshots, or bug reports. `internal/config.Config` holds the resolved token as a `SensitiveString`, a type whose formatting is redacted under every `fmt` verb (`%v`, `%+v`, `%#v`, `%s`, `%q`) and in error messages; only an explicit `.Reveal()` call returns the raw value, reserved for the OpenBao client landing in a later ticket. See `README.md`'s Security section for the vulnerability-reporting process.
@@ -166,6 +210,6 @@ were both supplied.
 
 ## Maintenance Notes
 
-- **Last game-day test:** 2026-09-17 — build, `--help`/`--version`, a usage error, an unimplemented-command error, `bpe validate` against a clean policy, a policy with only warnings, a policy with a semantic error, a policy with a syntax error, and a missing file, `bpe test` against an allowed request, a denied (default-deny) request, a request whose winning rule carries parameter constraints (`INCOMPLETE`, exit `3`), an unknown-capability usage error, a broader-deny-does-not-override-a-more-specific-allow regression, and a missing file, and Ctrl+C/SIGTERM interruption, all manually exercised against the built binary (FSM-13; FSM-12 covered everything but `test`).
-- **Next scheduled review:** when the next real feature (local-file commands and persistence, FSM-14) lands.
-- **Known drift risks:** the interactive editor, formatting, file persistence, and OpenBao connectivity do not exist yet. Connection, TLS, recovery, and policy-conflict procedures must be added as those features are implemented, not backfilled from assumption. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)).
+- **Last game-day test:** 2026-09-17 — build, `--help`/`--version`, a usage error, an unimplemented-command error (interactive editor only), `bpe validate` against a clean policy, a policy with only warnings, a policy with a semantic error, a policy with a syntax error, and a missing file, `bpe format` reformatting a misindented policy, `--check` reporting both "not formatted" and "already formatted" without writing, formatting refusing a genuine syntax error while still formatting a policy with a decode-time error (bad `expiration`) unchanged in meaning, `bpe test` against an allowed request, a denied (default-deny) request, a request whose winning rule carries parameter constraints (`INCOMPLETE`, exit `3`), an unknown-capability usage error, a broader-deny-does-not-override-a-more-specific-allow regression, and a missing file, and Ctrl+C/SIGTERM interruption, all manually exercised against the built binary (FSM-14 added `format`; FSM-13 added `test`; FSM-12 covered everything but those two).
+- **Next scheduled review:** when the next real feature (the visual terminal policy editor, FSM-15) lands.
+- **Known drift risks:** the interactive editor and OpenBao connectivity do not exist yet. Connection, TLS, and remote policy-conflict procedures must be added as those features are implemented, not backfilled from assumption. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.

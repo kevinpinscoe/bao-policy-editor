@@ -49,6 +49,20 @@ access is allowed, `1` if it is denied. See
 [Evaluation limits](#evaluation-limits) for what it deliberately does not
 attempt, and [Exit Codes](#exit-codes) for the full contract.
 
+To format a policy file in place:
+
+```bash
+./bin/bpe format policy.hcl
+```
+
+Or check whether it needs formatting, without writing it — suitable for CI:
+
+```bash
+./bin/bpe format policy.hcl --check
+```
+
+See [File writes](#file-writes) for what "in place" guarantees and does not.
+
 At this stage `bpe` and `bpe <policy.hcl>` (opening the interactive editor)
 print an explicit "not implemented yet" message and exit non-zero rather
 than starting a TUI — see [CLI Reference](#cli-reference) below for what
@@ -69,21 +83,22 @@ each command currently does.
 bpe                                                              Start the interactive editor with an empty policy
 bpe <policy.hcl>                                                 Start the interactive editor, opening a policy file
 bpe validate <policy.hcl>                                        Validate a policy without starting the interactive editor
-bpe format <policy.hcl>                                          Format a policy file
+bpe format <policy.hcl> [--check]                                Format a policy file, or check whether it is formatted
 bpe test <policy.hcl> --path <path> --capability <capability>    Simulate an effective-access check
 bpe help [command]                                                Show help, optionally for one command
 bpe --help / bpe <command> --help                                 Show help
 bpe --version                                                      Show version information
 ```
 
-`--path` and `--capability` may appear before or after the policy file. Global
-configuration flags (`--address`, `--token`, `--namespace`, `--ca-cert`,
-`--ca-path`, `--client-cert`, `--client-key`, `--tls-server-name`,
-`--skip-verify`) are accepted anywhere on the command line — see
-[Configuration](#configuration).
+`--path` and `--capability` may appear before or after the policy file, and so
+may `format`'s `--check`. Global configuration flags (`--address`, `--token`,
+`--namespace`, `--ca-cert`, `--ca-path`, `--client-cert`, `--client-key`,
+`--tls-server-name`, `--skip-verify`) are accepted anywhere on the command
+line — see [Configuration](#configuration).
 
 **Currently implemented:** argument parsing and validation, `--help`/`help`,
-`bpe <command> --help`, `--version`, `bpe validate <policy.hcl>`, and
+`bpe <command> --help`, `--version`, `bpe validate <policy.hcl>`,
+`bpe format <policy.hcl> [--check]`, and
 `bpe test <policy.hcl> --path <path> --capability <capability>` all behave
 as documented below.
 
@@ -117,11 +132,66 @@ denied one. `--capability` is validated against OpenBao's known
 capabilities before the file is even read (an unknown value is a usage
 error, exit `2`). It performs no write and never contacts OpenBao.
 
+`bpe format` reads the file and canonicalizes its HCL formatting
+(spacing, indentation, alignment) via `hclwrite.Format` — the same
+token-level formatter HashiCorp tools like `terraform fmt` use. It never
+decodes into the policy domain model, so it is gated on HCL syntax
+validity alone: a syntactically valid file with an unknown attribute, an
+attribute value the domain model can't parse (e.g. a non-RFC-3339
+`expiration`), or contradictory permission constraints (the kind `bpe
+validate` would flag) still formats successfully, with none of that
+content lost. Only a genuine HCL syntax error is refused, printing the
+same diagnostics `bpe validate` would and exiting `1`. An already-
+formatted file is left untouched, including its modification time — it
+is a true no-op, not a write of identical content. `--check` reports
+whether the file would change without writing it (exit `0` already
+formatted, `1` would reformat), and is the only mode that follows a
+symlink; see [File writes](#file-writes) for what writing "in place"
+does and does not guarantee.
+
 **Currently scaffolded — not implemented yet:** the interactive editor
-(`bpe` / `bpe <policy.hcl>`) and `format` parse and validate their
-arguments correctly, then report an explicit "not implemented yet" message
-on standard error and exit `3`. Neither silently succeeds, writes a
-file, or contacts OpenBao. Real behavior lands in FSM-14 through FSM-18.
+(`bpe` / `bpe <policy.hcl>`) parses and validates its arguments
+correctly, then reports an explicit "not implemented yet" message on
+standard error and exits `3`. It does not silently succeed, write a
+file, or contact OpenBao. Real behavior lands in FSM-15 through FSM-18.
+
+### File writes
+
+`bpe format` is currently the only command that writes to a local file;
+the TUI's save (FSM-15) and any future local side of a remote edit
+(FSM-16) will reuse the same `internal/fileio` package rather than
+duplicating this logic.
+
+- **Atomic.** A write goes to a temporary file in the same directory,
+  is `fsync`ed, has its permissions set, and is renamed over the
+  target — a reader never observes a half-written file. The temporary
+  file is removed on any failure before the rename; the target itself is
+  never deleted as a fallback.
+- **Permission-preserving.** The target's existing Unix permission bits
+  are carried onto the new content. Extended attributes and ACLs are
+  **not** preserved.
+- **Conflict-detecting, not a true compare-and-swap.** Before writing,
+  `bpe format` re-checks the file's on-disk state against a snapshot
+  taken when it was read — content hash and file identity, not just size
+  and modification time, so a same-size edit within one mtime tick, a
+  deletion, a replacement, or a permission change are all caught (exit
+  `4`). This narrows, but cannot close, the window between that check
+  and the rename: an uncooperative concurrent writer can still race it.
+  Treat it as a good-faith detector for the ordinary case — another
+  editor or another `bpe` invocation touching the same file — not a
+  guarantee against a deliberate race.
+- **Crash-durable, with one caveat.** The rename itself is atomic on
+  both of BPE's supported platforms (Linux, macOS), and the containing
+  directory is `fsync`ed afterward where the platform supports it, so
+  the replacement is durable across a crash, not merely atomic in
+  memory. If that post-rename step fails, `bpe format` reports that the
+  file **was** replaced — never that nothing happened.
+- **Symlinks and hard links.** Writing in place refuses a symlink
+  outright (exit `3`) rather than following it or replacing the link
+  itself — `--check` may still follow one, since it never writes.
+  Writing also refuses a file reliably detected to have more than one
+  hard link (Unix platforms only; undetectable elsewhere, in which case
+  this check is silently skipped).
 
 ### Evaluation limits
 
@@ -194,10 +264,10 @@ Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back 
 | Code | Meaning | Status |
 | --- | --- | --- |
 | `0` | Successful command, or `--help`/`help`/`--version` output | Active |
-| `1` | Policy validation failure, a denied `test` result, or a policy `test` cannot trust enough to simulate against (unsupported content or decode errors) | Active for `validate` (FSM-12) and `test` (FSM-13) — corrected from an earlier, mistaken "reserved for FSM-17" note; FSM-17 is TUI/remote integration, unrelated to this exit code |
+| `1` | `validate`: a validation failure. `test`: a denied result, or a policy it cannot trust enough to simulate against (unsupported content or decode errors). `format`: a genuine HCL syntax error, or — with `--check` only — the file would be reformatted. | Active for `validate` (FSM-12), `test` (FSM-13), and `format` (FSM-14) — corrected from an earlier, mistaken "reserved for FSM-17" note; FSM-17 is TUI/remote integration, unrelated to this exit code |
 | `2` | Command-line usage or configuration error | Active |
-| `3` | Operational failure, including a command deliberately not implemented yet, a policy file that could not be read, or a `test` result `bpe` cannot reduce to a trustworthy decision from path and capability alone (see [Evaluation limits](#evaluation-limits)) | Active |
-| `4` | Concurrent modification or version conflict | Reserved for FSM-16 |
+| `3` | Operational failure, including a command deliberately not implemented yet, a policy file that could not be read, a `test` result `bpe` cannot reduce to a trustworthy decision from path and capability alone (see [Evaluation limits](#evaluation-limits)), or `format` refusing to write through a symlink or a detected hard-linked file | Active |
+| `4` | A detected write conflict: for `format`, the local file changed on disk between being read and being written (see [File writes](#file-writes)) | Active for `format` (FSM-14); also reserved for a future remote OpenBao version/CAS conflict (FSM-16) — the same category of problem at a different layer |
 | `130` | Interrupted by the user (Ctrl+C or SIGTERM) | Active |
 
 ## Common Commands
@@ -215,7 +285,11 @@ go run ./cmd/bpe policy.hcl
 # Build
 go build -o ./bin/bpe ./cmd/bpe
 
-# Format
+# Format a policy file, or check whether it needs formatting (CI)
+go run ./cmd/bpe format policy.hcl
+go run ./cmd/bpe format policy.hcl --check
+
+# Format Go source
 go fmt ./...
 
 # Test
@@ -245,6 +319,7 @@ bao-policy-editor/
 │   ├── evaluator/             # Matching and effective-access simulation
 │   ├── baoclient/             # OpenBao API integration
 │   ├── config/                # Environment and file configuration
+│   ├── fileio/                 # Safe local file persistence — atomic writes, conflict detection
 │   └── apperr/                 # Structured application errors and the exit-code contract
 ├── testdata/
 │   └── policies/              # Valid, invalid, and edge-case HCL fixtures
@@ -260,7 +335,7 @@ bao-policy-editor/
 
 ## How It Works
 
-The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL, while `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
+The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL, while `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API. `fileio` reads a local file together with a snapshot of its on-disk state and later replaces it only if that state has not changed — the shared local-persistence primitive `bpe format` uses today and the TUI's save and `baoclient`'s local side will reuse later; it is local-filesystem only; remote OpenBao CAS handling stays `baoclient`'s concern. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), help text (`help.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
 
 ```text
 Local HCL file ─┐
@@ -278,6 +353,7 @@ OpenBao API ─────┘
 - Add table-driven tests and HCL fixtures for policy behavior and regressions.
 - Tests must not require access to a live OpenBao server unless explicitly marked as integration tests.
 - CLI argument parsing, configuration precedence, and command dispatch (help/usage/exit codes/cancellation) are covered by table-driven tests in `cmd/bpe` and `internal/config` that call Go functions directly rather than invoking a subprocess. A small number of process-level tests in `cmd/bpe` verify end-to-end exit-code behavior through the compiled binary.
+- `internal/fileio`'s atomic write, permission preservation, and conflict detection (content change, deletion, replacement, permission change) are covered by table-driven tests using `t.TempDir()`; none touch a real user file.
 
 ## Build and Release
 
@@ -295,7 +371,7 @@ See [`RUNBOOK.md`](RUNBOOK.md) for operational procedures.
 
 Common connection, TLS, terminal-rendering, logging, and recovery procedures belong in [`RUNBOOK.md`](RUNBOOK.md). Operational guidance there is still under development until those features exist.
 
-**Current limitations:** the interactive editor, formatting, file persistence, and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), and effective-access simulation (FSM-13, `bpe test`) are implemented — the latter with the scope limits in [Evaluation limits](#evaluation-limits). Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
+**Current limitations:** the interactive editor and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), effective-access simulation (FSM-13, `bpe test`), and safe local-file formatting and persistence (FSM-14, `bpe format`, `internal/fileio`) are implemented — `bpe test` with the scope limits in [Evaluation limits](#evaluation-limits), and `bpe format`'s writes with the guarantees and caveats in [File writes](#file-writes). Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
 
 ## Security
 

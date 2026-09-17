@@ -67,6 +67,22 @@ type Document struct {
 	// content from the domain model alone.
 	Unsupported bool
 
+	// HasSyntaxError is true when the source failed to parse as
+	// syntactically valid HCL at all — a raw hclwrite/hclsyntax parse
+	// diagnostic at hcl.DiagError, as opposed to a decode-time semantic
+	// finding (an unknown attribute, a malformed known-attribute value
+	// such as an unparsable expiration timestamp, and so on), which is
+	// syntactically fine HCL that simply says something FSM-11's domain
+	// model cannot fully represent or trust.
+	//
+	// This is deliberately narrower than HasErrors(), which also reports
+	// true for those decode-time findings. The distinction exists for
+	// FSM-14's `bpe format`: formatting operates on the token stream via
+	// hclwrite.Format and never touches the decoded Policy, so it is safe
+	// to run on a file with decode-time errors or unsupported content —
+	// it only needs to refuse a file HCL itself cannot parse.
+	HasSyntaxError bool
+
 	raw *hclwrite.File
 }
 
@@ -111,6 +127,9 @@ func Parse(filename string, src []byte) (*Document, error) {
 
 	rawFile, rawDiags := hclwrite.ParseConfig(src, filename, hcl.InitialPos)
 	doc.Diagnostics = append(doc.Diagnostics, diagnosticsFromHCL(rawDiags)...)
+	if rawDiags.HasErrors() {
+		doc.HasSyntaxError = true
+	}
 	if rawFile == nil {
 		// hclwrite failed to produce even a token tree — nothing to
 		// preserve or decode. This is rare; hclwrite tolerates most
@@ -121,6 +140,9 @@ func Parse(filename string, src []byte) (*Document, error) {
 
 	hclFile, synDiags := hclsyntax.ParseConfig(src, filename, hcl.InitialPos)
 	doc.Diagnostics = append(doc.Diagnostics, diagnosticsFromHCL(synDiags)...)
+	if synDiags.HasErrors() {
+		doc.HasSyntaxError = true
+	}
 	if hclFile == nil || hclFile.Body == nil {
 		return doc, nil
 	}

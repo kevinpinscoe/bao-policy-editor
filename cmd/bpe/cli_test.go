@@ -34,6 +34,21 @@ func TestParseArgs_Success(t *testing.T) {
 			want: Command{Kind: KindFormat, PolicyFile: "policy.hcl"},
 		},
 		{
+			name: "format subcommand with --check after filename",
+			args: []string{"format", "policy.hcl", "--check"},
+			want: Command{Kind: KindFormat, PolicyFile: "policy.hcl", FormatCheck: true},
+		},
+		{
+			name: "format subcommand with --check before filename",
+			args: []string{"format", "--check", "policy.hcl"},
+			want: Command{Kind: KindFormat, PolicyFile: "policy.hcl", FormatCheck: true},
+		},
+		{
+			name: "format subcommand --help",
+			args: []string{"format", "--help"},
+			want: Command{Kind: KindHelp, HelpTopic: "format"},
+		},
+		{
 			name: "test subcommand, flags after filename (as documented)",
 			args: []string{"test", "policy.hcl", "--path", "secret/data/example", "--capability", "read"},
 			want: Command{Kind: KindTest, PolicyFile: "policy.hcl", TestPath: "secret/data/example", TestCapability: "read"},
@@ -116,6 +131,9 @@ func TestParseArgs_Success(t *testing.T) {
 			if got.HelpTopic != tc.want.HelpTopic {
 				t.Errorf("HelpTopic = %q, want %q", got.HelpTopic, tc.want.HelpTopic)
 			}
+			if got.FormatCheck != tc.want.FormatCheck {
+				t.Errorf("FormatCheck = %v, want %v", got.FormatCheck, tc.want.FormatCheck)
+			}
 		})
 	}
 }
@@ -145,10 +163,12 @@ func TestParseArgs_Errors(t *testing.T) {
 		{name: "missing --capability", args: []string{"test", "policy.hcl", "--path", "x"}},
 		{name: "empty --path treated as missing", args: []string{"test", "policy.hcl", "--path=", "--capability", "read"}},
 		{name: "unexpected argument — validate", args: []string{"validate", "policy.hcl", "extra.hcl"}},
+		{name: "unexpected argument — format", args: []string{"format", "policy.hcl", "extra.hcl"}},
 		{name: "unexpected argument — test", args: []string{"test", "policy.hcl", "extra.hcl", "--path", "x", "--capability", "read"}},
 		{name: "unknown command", args: []string{"frobnicate", "extra"}},
 		{name: "unknown flag at top level", args: []string{"--bogus-flag"}},
 		{name: "unknown flag within validate", args: []string{"validate", "--bogus-flag", "policy.hcl"}},
+		{name: "unknown flag within format", args: []string{"format", "policy.hcl", "--bogus-flag"}},
 		{name: "unknown flag within test", args: []string{"test", "policy.hcl", "--path", "x", "--capability", "read", "--bogus"}},
 		{name: "unexpected argument after --help", args: []string{"--help", "extra"}},
 		{name: "unexpected argument after --version", args: []string{"--version", "extra"}},

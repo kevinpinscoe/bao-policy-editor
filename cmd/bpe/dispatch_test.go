@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kevinpinscoe/bao-policy-editor/internal/apperr"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/config"
+	"github.com/kevinpinscoe/bao-policy-editor/internal/fileio"
 )
 
 // writePolicyFile writes src to a temp file named name within t's
@@ -76,7 +80,6 @@ func TestExecute_UnimplementedReturnsOperationalExitCode(t *testing.T) {
 	cases := [][]string{
 		nil,
 		{"policy.hcl"},
-		{"format", "policy.hcl"},
 	}
 
 	for _, args := range cases {
@@ -356,6 +359,309 @@ func TestExecute_NoSensitiveValuesInOutput(t *testing.T) {
 			}
 			if strings.Contains(stderr.String(), secret) {
 				t.Errorf("stderr leaked the token: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestExecute_Format_MissingFile_ExitOperational(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", filepath.Join(t.TempDir(), "missing.hcl")}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitOperational) {
+		t.Errorf("exit code = %d, want %d", code, apperr.ExitOperational)
+	}
+}
+
+func TestExecute_Format_ReformatsAndWrites_ExitSuccess(t *testing.T) {
+	path := writePolicyFile(t, "messy.hcl", "path   \"secret/data/foo\"    {\ncapabilities=[\"read\"]\n}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", path}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitSuccess) {
+		t.Errorf("exit code = %d, want %d; stderr = %q", code, apperr.ExitSuccess, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "formatted") {
+		t.Errorf("stdout = %q, want it to report the file was formatted", stdout.String())
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n"
+	if string(got) != want {
+		t.Errorf("file content after format = %q, want %q", got, want)
+	}
+}
+
+func TestExecute_Format_PreservesPermissions(t *testing.T) {
+	path := writePolicyFile(t, "messy.hcl", "path   \"secret/data/foo\"    {\ncapabilities=[\"read\"]\n}\n")
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", path}, nil, &stdout, &stderr, noEnv)
+	if code != int(apperr.ExitSuccess) {
+		t.Fatalf("exit code = %d, want %d; stderr = %q", code, apperr.ExitSuccess, stderr.String())
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Errorf("permissions after format = %v, want %v", info.Mode().Perm(), os.FileMode(0o640))
+	}
+}
+
+func TestExecute_Format_AlreadyFormatted_NoOpPreservesModTime(t *testing.T) {
+	clean := "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n"
+	path := writePolicyFile(t, "clean.hcl", clean)
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Filesystem mtime resolution can be coarser than this test runs in;
+	// back the recorded time off by a safe margin so a real rewrite
+	// (which would set mtime to "now") is unambiguously detectable.
+	past := before.ModTime().Add(-time.Hour)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", path}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitSuccess) {
+		t.Errorf("exit code = %d, want %d; stderr = %q", code, apperr.ExitSuccess, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already formatted") {
+		t.Errorf("stdout = %q, want it to report already formatted", stdout.String())
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(past) {
+		t.Errorf("ModTime changed on a no-op format: was %v, now %v — an already-formatted file must not be rewritten", past, after.ModTime())
+	}
+}
+
+func TestExecute_Format_Check_WouldReformat_ExitPolicyIssue_NoWrite(t *testing.T) {
+	messy := "path   \"secret/data/foo\"    {\ncapabilities=[\"read\"]\n}\n"
+	path := writePolicyFile(t, "messy.hcl", messy)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", path, "--check"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitPolicyIssue) {
+		t.Errorf("exit code = %d, want %d", code, apperr.ExitPolicyIssue)
+	}
+	if !strings.Contains(stdout.String(), "not formatted") {
+		t.Errorf("stdout = %q, want it to report the file is not formatted", stdout.String())
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != messy {
+		t.Errorf("--check modified the file: got %q, want the original %q unchanged", got, messy)
+	}
+}
+
+func TestExecute_Format_Check_AlreadyFormatted_ExitSuccess(t *testing.T) {
+	clean := "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n"
+	path := writePolicyFile(t, "clean.hcl", clean)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", path, "--check"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitSuccess) {
+		t.Errorf("exit code = %d, want %d; stderr = %q", code, apperr.ExitSuccess, stderr.String())
+	}
+}
+
+func TestExecute_Format_SyntaxError_ExitPolicyIssue_NoWrite(t *testing.T) {
+	broken := "path \"secret/data/broken\" {\n  capabilities = [\"read\"]\n"
+	path := writePolicyFile(t, "broken.hcl", broken)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", path}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitPolicyIssue) {
+		t.Errorf("exit code = %d, want %d for malformed HCL", code, apperr.ExitPolicyIssue)
+	}
+	if stdout.Len() == 0 {
+		t.Error("stdout is empty, want the syntax-error diagnostic printed")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != broken {
+		t.Errorf("a syntactically invalid file was modified despite the refusal: got %q", got)
+	}
+}
+
+// TestExecute_Format_SemanticProblemsStillFormat is FSM-14's central
+// regression for Kevin's instruction: formatting is gated on HCL syntax
+// validity alone. A decode-time error (an unparseable expiration), an
+// unsupported attribute or block, and a Validate-level contradiction
+// (required_parameters vs. denied_parameters) must all still format
+// successfully, and none of the unrecognized content may be lost.
+func TestExecute_Format_SemanticProblemsStillFormat(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		// mustContain is checked against the file's content after
+		// formatting, to confirm content this domain model cannot
+		// decode was not silently dropped.
+		mustContain string
+	}{
+		{
+			name:        "unparseable expiration timestamp",
+			src:         "path   \"secret/data/foo\"    {\ncapabilities=[\"read\"]\nexpiration=\"not-a-timestamp\"\n}\n",
+			mustContain: "not-a-timestamp",
+		},
+		{
+			name:        "unsupported attribute",
+			src:         "path   \"secret/data/foo\"    {\ncapabilities=[\"read\"]\nfuture_option=\"x\"\n}\n",
+			mustContain: "future_option",
+		},
+		{
+			name:        "unsupported top-level block",
+			src:         "path \"secret/data/foo\" {\ncapabilities=[\"read\"]\n}\n\nunknown_block \"example\" {\nsome_attribute=\"value\"\n}\n",
+			mustContain: "unknown_block",
+		},
+		{
+			name: "contradictory required/denied parameter (Validate-level, not decode-level)",
+			src: "path \"secret/data/team-a/*\" {\n" +
+				"  capabilities         = [\"create\", \"read\", \"update\"]\n" +
+				"  required_parameters  = [\"owner\"]\n" +
+				"  allowed_parameters   = {\n    \"ttl\" = [\"1h\", \"24h\"]\n  }\n" +
+				"  denied_parameters    = {\n    \"owner\" = []\n  }\n" +
+				"}\n",
+			mustContain: "required_parameters",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePolicyFile(t, "policy.hcl", tc.src)
+
+			var stdout, stderr bytes.Buffer
+			code := Execute(context.Background(), []string{"format", path}, nil, &stdout, &stderr, noEnv)
+
+			if code != int(apperr.ExitSuccess) {
+				t.Fatalf("exit code = %d, want %d (syntactically valid content must format even with semantic problems); stdout=%q stderr=%q", code, apperr.ExitSuccess, stdout.String(), stderr.String())
+			}
+
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), tc.mustContain) {
+				t.Errorf("formatted content lost %q — got:\n%s", tc.mustContain, got)
+			}
+		})
+	}
+}
+
+func TestExecute_Format_RefusesSymlink_ExitOperational(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.hcl")
+	if err := os.WriteFile(target, []byte("path   \"secret/data/foo\"    {\ncapabilities=[\"read\"]\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.hcl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", link}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitOperational) {
+		t.Errorf("exit code = %d, want %d — bpe format must refuse to write through a symlink", code, apperr.ExitOperational)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "  capabilities") {
+		t.Errorf("symlink target was reformatted despite the refusal: %q", got)
+	}
+}
+
+func TestExecute_Format_Check_FollowsSymlink(t *testing.T) {
+	// --check is read-only, so it may follow a symlink (only in-place
+	// writing refuses one) — see internal/fileio's package doc.
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.hcl")
+	messy := "path   \"secret/data/foo\"    {\ncapabilities=[\"read\"]\n}\n"
+	if err := os.WriteFile(target, []byte(messy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.hcl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"format", link, "--check"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitPolicyIssue) {
+		t.Errorf("exit code = %d, want %d — --check should read through the symlink and report it needs formatting", code, apperr.ExitPolicyIssue)
+	}
+}
+
+func TestMapFormatWriteError(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantCode apperr.ExitCode
+	}{
+		{
+			name:     "conflict",
+			err:      fmt.Errorf("%w: %s", fileio.ErrConflict, fileio.ReasonContentChanged),
+			wantCode: apperr.ExitConflict,
+		},
+		{
+			name:     "symlink",
+			err:      fileio.ErrSymlink,
+			wantCode: apperr.ExitOperational,
+		},
+		{
+			name:     "hard linked",
+			err:      fileio.ErrHardLinked,
+			wantCode: apperr.ExitOperational,
+		},
+		{
+			name:     "post-replacement failure",
+			err:      &fileio.PostReplacementError{Cause: errors.New("directory sync failed")},
+			wantCode: apperr.ExitOperational,
+		},
+		{
+			name:     "unrecognized error",
+			err:      errors.New("disk full"),
+			wantCode: apperr.ExitOperational,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			got := mapFormatWriteError("policy.hcl", tc.err, &stdout)
+			if code := apperr.CodeOf(got); code != tc.wantCode {
+				t.Errorf("CodeOf(mapFormatWriteError(...)) = %d, want %d (err: %v)", code, tc.wantCode, got)
 			}
 		})
 	}

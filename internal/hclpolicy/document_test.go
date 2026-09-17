@@ -31,6 +31,9 @@ func TestParse_ValidPolicy(t *testing.T) {
 	if doc.Unsupported {
 		t.Error("Unsupported = true, want false for a fully-supported fixture")
 	}
+	if doc.HasSyntaxError {
+		t.Error("HasSyntaxError = true, want false for a fully-supported fixture")
+	}
 
 	if got, want := len(doc.Policy.Rules), 3; got != want {
 		t.Fatalf("len(Rules) = %d, want %d", got, want)
@@ -83,6 +86,9 @@ func TestParse_InvalidSyntax(t *testing.T) {
 	if !doc.HasErrors() {
 		t.Fatal("HasErrors() = false, want true for malformed HCL")
 	}
+	if !doc.HasSyntaxError {
+		t.Error("HasSyntaxError = false, want true for HCL that fails to parse at all")
+	}
 
 	found := false
 	for _, d := range doc.Diagnostics {
@@ -106,6 +112,9 @@ func TestParse_InvalidExpiration(t *testing.T) {
 	}
 	if !doc.HasErrors() {
 		t.Fatal("HasErrors() = false, want true for an invalid expiration timestamp")
+	}
+	if doc.HasSyntaxError {
+		t.Error("HasSyntaxError = true, want false — the HCL itself parses fine; only the decoded value is invalid")
 	}
 	if doc.Policy.Rules[0].Expiration != nil {
 		t.Error("Expiration was set despite being unparseable")
@@ -135,6 +144,9 @@ func TestParse_UnsupportedBlock(t *testing.T) {
 	if doc.HasErrors() {
 		t.Fatalf("HasErrors() = true, want false (unsupported content is a warning, not an error): %v", doc.Diagnostics)
 	}
+	if doc.HasSyntaxError {
+		t.Error("HasSyntaxError = true, want false — unsupported content is syntactically valid HCL")
+	}
 	if !doc.Unsupported {
 		t.Error("Unsupported = false, want true — the file has a non-path top-level block")
 	}
@@ -155,6 +167,9 @@ func TestParse_UnsupportedAttribute(t *testing.T) {
 	}
 	if !doc.Unsupported {
 		t.Error("Unsupported = false, want true — the path block has an unrecognized attribute")
+	}
+	if doc.HasSyntaxError {
+		t.Error("HasSyntaxError = true, want false — an unsupported attribute is syntactically valid HCL")
 	}
 	if !strings.Contains(string(doc.Bytes()), "future_option") {
 		t.Error("Bytes() lost the unsupported attribute — content was silently dropped")
