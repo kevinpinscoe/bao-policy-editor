@@ -332,9 +332,12 @@ func TestCompile_FutureExpiration_StillActive(t *testing.T) {
 }
 
 // TestCompile_ExpiredDeny_ContributesNothing is Kevin's point 4,
-// 2026-09-17: an expired deny must not merely lose to another rule — it
+// 2026-09-17 (and re-confirmed as regression-review point 3,
+// 2026-09-17): an expired deny must not merely lose to another rule — it
 // must be excluded from compilation entirely, so a broader allow that it
-// would otherwise have shadowed becomes reachable.
+// would otherwise have shadowed becomes reachable. Uses fixedNow, a
+// fixed compilation timestamp, so expiration is deterministic here as in
+// every other test in this file.
 func TestCompile_ExpiredDeny_ContributesNothing(t *testing.T) {
 	past := fixedNow.Add(-time.Hour)
 	ev := compile(t,
@@ -455,6 +458,71 @@ func TestEvaluate_IdentityTemplate_Incomplete(t *testing.T) {
 	}
 	if d.Allowed {
 		t.Error("got Allowed = true, want false for an unresolved identity template")
+	}
+}
+
+// TestEvaluate_IdentityTemplate_NearMiss_Incomplete is Kevin's point 1,
+// 2026-09-17: a request path that does NOT literally contain the
+// template text must still return INCOMPLETE, not silently fall through
+// to a confident-looking default deny, when a templated rule elsewhere
+// is structurally consistent with the requested path (i.e. could match
+// once the template resolves to a real identity value). This was a real
+// gap — reproduced against the evaluator before this fix landed, which
+// returned {Allowed:false, Stage:StageDefaultDeny, Incomplete:false,
+// err:nil} for exactly this case, indistinguishable from a genuine,
+// trustworthy default deny.
+func TestEvaluate_IdentityTemplate_NearMiss_Incomplete(t *testing.T) {
+	ev := compile(t, named("p.hcl", rule("secret/data/{{identity.entity.id}}/*", policy.CapabilityRead)))
+
+	// A concrete path that could plausibly be this rule's pattern once
+	// "{{identity.entity.id}}" resolves to "bob-the-entity" — its literal
+	// text contains no "{{"/"}}" at all.
+	d, err := ev.Evaluate("secret/data/bob-the-entity/foo", policy.CapabilityRead)
+	if !errors.Is(err, ErrIncompleteEvaluation) {
+		t.Fatalf("err = %v, want ErrIncompleteEvaluation — a templated rule could plausibly have matched this path", err)
+	}
+	if d.Allowed {
+		t.Error("got Allowed = true, want false")
+	}
+	if !d.Incomplete {
+		t.Error("Incomplete = false, want true")
+	}
+	if !strings.Contains(d.IncompleteReason, "identity.entity.id") {
+		t.Errorf("IncompleteReason = %q, want it to name the templated pattern", d.IncompleteReason)
+	}
+}
+
+// TestEvaluate_IdentityTemplate_UnrelatedPath_StaysDefaultDeny proves the
+// near-miss check in the previous test is scoped to paths a templated
+// rule could actually have mattered for — an unrelated templated rule
+// elsewhere in the policy must not poison every other default-deny
+// result with a false INCOMPLETE.
+func TestEvaluate_IdentityTemplate_UnrelatedPath_StaysDefaultDeny(t *testing.T) {
+	ev := compile(t, named("p.hcl", rule("secret/data/{{identity.entity.id}}/*", policy.CapabilityRead)))
+
+	d, err := ev.Evaluate("sys/health", policy.CapabilityRead)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v, want nil — sys/health shares no literal prefix with the templated rule", err)
+	}
+	if d.Allowed || d.Incomplete || d.Stage != StageDefaultDeny {
+		t.Errorf("got %+v, want a genuine, confident default deny", d)
+	}
+}
+
+// TestEvaluate_IdentityTemplate_NearMiss_SegmentCountMismatch_StaysDefaultDeny
+// checks a path that shares the templated rule's literal prefix but has
+// the wrong number of path segments to ever match it (the templated rule
+// is not a prefix pattern) — still not plausible, still a genuine
+// default deny.
+func TestEvaluate_IdentityTemplate_NearMiss_SegmentCountMismatch_StaysDefaultDeny(t *testing.T) {
+	ev := compile(t, named("p.hcl", rule("secret/data/{{identity.entity.id}}/config", policy.CapabilityRead)))
+
+	d, err := ev.Evaluate("secret/data/bob/config/extra", policy.CapabilityRead)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v, want nil", err)
+	}
+	if d.Allowed || d.Incomplete || d.Stage != StageDefaultDeny {
+		t.Errorf("got %+v, want a genuine default deny — the templated pattern is not a prefix, so an extra path segment rules it out", d)
 	}
 }
 

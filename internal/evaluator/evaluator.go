@@ -166,6 +166,13 @@ type Evaluator struct {
 	exact     map[string]*compiledRule
 	prefixes  []*compiledRule
 	wildcards []*compiledRule
+
+	// templated is every compiledRule whose pattern looks like it
+	// contains an unresolved OpenBao identity template ("{{"/"}}"),
+	// regardless of which of the three indices above it also lives in.
+	// Evaluate consults this before conceding a true default deny — see
+	// templatedNearMiss.
+	templated []*compiledRule
 }
 
 // Compile builds an Evaluator from policies. at is the evaluation time
@@ -271,6 +278,10 @@ func (e *Evaluator) findOrCreate(pattern, matchPath string, isPrefix, hasSegment
 		e.prefixes = append(e.prefixes, target)
 	default:
 		e.exact[matchPath] = target
+	}
+
+	if target.looksTemplated {
+		e.templated = append(e.templated, target)
 	}
 
 	return target
@@ -492,7 +503,7 @@ type Decision struct {
 //
 // If the winning rule cannot be reduced to a trustworthy allow/deny from
 // path and capability alone, Evaluate returns a non-nil error wrapping
-// ErrIncompleteEvaluation instead of guessing. Two cases trigger this:
+// ErrIncompleteEvaluation instead of guessing. Three cases trigger this:
 //
 //   - The winning rule's pattern looks like an unresolved OpenBao
 //     identity template ("{{"/"}}" present) — BPE's domain model has no
@@ -505,11 +516,16 @@ type Decision struct {
 //     real decision needs the actual request's parameter values, which
 //     Evaluate (and bpe test, which supplies only a path and a
 //     capability) is never given.
+//   - Nothing matched literally, but an identity-template rule elsewhere
+//     is structurally consistent with path — it COULD have matched once
+//     its template resolves to a real value. Kevin's instruction,
+//     2026-09-17: Evaluate must not silently present this as a confident
+//     default deny; see templatedNearMiss.
 //
-// Decision is still populated with what IS known (winning pattern,
-// stage) when this error is returned, but Decision.Allowed is always
-// false in that case and must never be read as a real denial — check
-// Decision.Incomplete, or the returned error, instead.
+// Decision is still populated with what IS known (winning pattern where
+// there is one, stage) when this error is returned, but Decision.Allowed
+// is always false in that case and must never be read as a real denial —
+// check Decision.Incomplete, or the returned error, instead.
 func (e *Evaluator) Evaluate(path string, capability policy.Capability) (Decision, error) {
 	if !capability.Known() {
 		return Decision{}, fmt.Errorf("%w: %q", ErrUnknownCapability, capability)
@@ -544,9 +560,39 @@ func (e *Evaluator) Evaluate(path string, capability policy.Capability) (Decisio
 		}
 	}
 
+	// Nothing matched literally. Before conceding a true default deny,
+	// check whether an unresolved identity-template rule could plausibly
+	// have mattered for this exact path — see templatedNearMiss's doc
+	// comment. This check is deliberately last: every real stage above
+	// gets a genuine chance to match first, so a templated rule never
+	// pre-empts an actual, confident answer.
+	if tmpl := e.templatedNearMiss(path); tmpl != nil {
+		return incompleteFromTemplateNearMiss(d, tmpl, path)
+	}
+	if isListOrScan && strings.HasSuffix(path, "/") {
+		if tmpl := e.templatedNearMiss(strings.TrimSuffix(path, "/")); tmpl != nil {
+			return incompleteFromTemplateNearMiss(d, tmpl, path)
+		}
+	}
+
 	d.Stage = StageDefaultDeny
 	d.Allowed = false
 	return d, nil
+}
+
+// incompleteFromTemplateNearMiss builds the Decision/error pair for a
+// templatedNearMiss hit — distinct from decide's own looksTemplated
+// check, which fires when a templated rule actually WON the lookup
+// (rather than merely being structurally consistent with a path nothing
+// else matched).
+func incompleteFromTemplateNearMiss(d Decision, tmpl *compiledRule, path string) (Decision, error) {
+	d.Stage = StageDefaultDeny
+	d.Incomplete = true
+	d.IncompleteReason = fmt.Sprintf(
+		"no rule matched %q literally, but path %q contains an unresolved OpenBao identity template that could plausibly match it once resolved; bpe does not resolve identity templates, so a default-deny answer here would not be trustworthy",
+		path, tmpl.pattern,
+	)
+	return d, fmt.Errorf("%w: %s", ErrIncompleteEvaluation, d.IncompleteReason)
 }
 
 // decide fills in d from the winning rule and stage. See Evaluate's doc

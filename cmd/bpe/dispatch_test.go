@@ -280,7 +280,15 @@ func TestExecute_Test_IncompleteEvaluation_ExitOperational(t *testing.T) {
 	}
 }
 
-func TestExecute_Test_UnsupportedContent_ExitPolicyIssue(t *testing.T) {
+// TestExecute_Test_UnsupportedAttribute_NeverAllowsUnconditionally is
+// regression-review point 2, 2026-09-17: an unsupported attribute that
+// might be authorization-affecting must remain visible to bpe test (its
+// diagnostic printed, not dropped in the HCL-to-domain-model conversion)
+// and must never let the request print an unconditional ALLOWED. The
+// policy here grants exactly the requested capability on exactly the
+// requested path — if bpe test evaluated the incomplete decoded Policy
+// anyway, it would confidently say ALLOWED; it must refuse instead.
+func TestExecute_Test_UnsupportedAttribute_NeverAllowsUnconditionally(t *testing.T) {
 	path := writePolicyFile(t, "unsupported.hcl", "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n  future_option = \"nope\"\n}\n")
 
 	var stdout, stderr bytes.Buffer
@@ -291,6 +299,32 @@ func TestExecute_Test_UnsupportedContent_ExitPolicyIssue(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "future_option") {
 		t.Errorf("stdout = %q, want the unsupported-attribute diagnostic printed, not dropped", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "ALLOWED") {
+		t.Errorf("stdout = %q, must never print ALLOWED when unsupported content could be authorization-affecting", stdout.String())
+	}
+}
+
+// TestExecute_Test_UnsupportedBlock_NeverAllowsUnconditionally is the
+// same regression as above, for a top-level unsupported BLOCK rather
+// than an unsupported attribute within a path block — a different code
+// path in hclpolicy's decoder (FSM-11), so it earns its own case rather
+// than assuming the attribute case covers it.
+func TestExecute_Test_UnsupportedBlock_NeverAllowsUnconditionally(t *testing.T) {
+	src := "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n\nunknown_block \"example\" {\n  some_attribute = \"value\"\n}\n"
+	path := writePolicyFile(t, "unsupported-block.hcl", src)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", path, "--path", "secret/data/foo", "--capability", "read"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitPolicyIssue) {
+		t.Errorf("exit code = %d, want %d", code, apperr.ExitPolicyIssue)
+	}
+	if !strings.Contains(stdout.String(), "unknown_block") {
+		t.Errorf("stdout = %q, want the unsupported-block diagnostic printed, not dropped", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "ALLOWED") {
+		t.Errorf("stdout = %q, must never print ALLOWED when unsupported content could be authorization-affecting", stdout.String())
 	}
 }
 

@@ -49,6 +49,71 @@ func classifyPath(raw string) (matchPath string, isPrefix, hasSegmentWildcards b
 	return matchPath, isPrefix, hasSegmentWildcards, nil
 }
 
+// templatedNearMiss reports whether some rule containing an unresolved
+// OpenBao identity template could plausibly match path once that
+// template is resolved to a real value — checked only when nothing else
+// has matched literally, right before Evaluate would otherwise concede a
+// true default deny (Kevin's instruction, 2026-09-17: an unresolved
+// identity-template rule that could affect the requested path must
+// return INCOMPLETE, even when its literal template text does not match
+// the request — it must not silently fall through to default deny).
+//
+// This is deliberately conservative rather than exhaustive: a templated
+// segment is treated as matching anything (the same way a "+" segment
+// is), so a rule is flagged whenever it is structurally CONSISTENT with
+// path, not only when BPE can prove it would actually win. That keeps
+// the check scoped to rules that could genuinely have mattered for this
+// specific path — an unrelated templated rule elsewhere in the policy
+// (different literal prefix, different segment count) does not poison
+// every other default-deny result.
+func (e *Evaluator) templatedNearMiss(path string) *compiledRule {
+	for _, r := range e.templated {
+		if couldTemplatedRuleMatch(r.pattern, path) {
+			return r
+		}
+	}
+	return nil
+}
+
+// couldTemplatedRuleMatch is templatedNearMiss's per-rule structural
+// check: every literal segment of pattern must equal the corresponding
+// segment of path exactly (or, for a trailing "*" prefix pattern's last
+// segment, be a literal string prefix of it — the same partial-match
+// rule matchWildcardRule uses); every "+" or template ("{{"/"}}")
+// segment matches anything.
+func couldTemplatedRuleMatch(pattern, path string) bool {
+	isPrefix := false
+	p := pattern
+	if before, ok := strings.CutSuffix(pattern, "*"); ok {
+		isPrefix = true
+		p = before
+	}
+
+	patternSegs := strings.Split(p, "/")
+	pathSegs := strings.Split(path, "/")
+
+	if len(pathSegs) < len(patternSegs) {
+		return false
+	}
+	if !isPrefix && len(pathSegs) != len(patternSegs) {
+		return false
+	}
+
+	for i, seg := range patternSegs {
+		switch {
+		case seg == "+":
+		case strings.Contains(seg, "{{") && strings.Contains(seg, "}}"):
+		case isPrefix && i == len(patternSegs)-1:
+			if !strings.HasPrefix(pathSegs[i], seg) {
+				return false
+			}
+		case seg != pathSegs[i]:
+			return false
+		}
+	}
+	return true
+}
+
 // wildcardCandidate mirrors OpenBao's wcPathDescr (acl.go) — a candidate
 // among prefix-or-segment-wildcard matches, ranked by the 5-rule
 // priority comparator in priorityLess.
