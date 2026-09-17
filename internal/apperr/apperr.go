@@ -14,17 +14,25 @@ import (
 // the call site rather than left to be memorized.
 type ExitCode int
 
-// The exit-code contract for BPE. 0, 2, 3, and 130 are active as of FSM-10.
-// 1 and 4 are reserved for later tickets (policy validation/test results,
-// and concurrent-modification conflicts) and are not returned by any code
-// introduced in this ticket.
+// The exit-code contract for BPE. All six active codes below are now in
+// use: 0/2/3/130 since FSM-10, 1 since FSM-12 (policy validation) and
+// FSM-13 (test results), and 4 since FSM-14 (a local file that changed on
+// disk between being read and written — see internal/fileio). 4 remains
+// the code a future ticket (FSM-16) will also return for a remote OpenBao
+// version/CAS conflict; the two are the same category of problem — "this
+// changed since I read it" — at different layers, not different codes.
 const (
 	// ExitSuccess is returned for a successful command, or for --help/help/
 	// --version output.
 	ExitSuccess ExitCode = 0
 
-	// ExitPolicyIssue is reserved for a policy validation failure or a
-	// denied policy test result. No command in this ticket returns it.
+	// ExitPolicyIssue is returned for a policy validation failure
+	// (FSM-12's `bpe validate`), a denied or untrustworthy policy test
+	// result (FSM-13's `bpe test`), and `bpe format`'s two content-level
+	// outcomes (FSM-14): the source has a genuine HCL syntax error, or
+	// (with --check) the file would be reformatted. See each command's
+	// own doc comment in cmd/bpe/dispatch.go for exactly which of its
+	// conditions map here versus to ExitOperational.
 	ExitPolicyIssue ExitCode = 1
 
 	// ExitUsage is returned for a command-line usage or configuration
@@ -37,9 +45,11 @@ const (
 	// command whose real implementation is deliberately not built yet.
 	ExitOperational ExitCode = 3
 
-	// ExitConflict is reserved for a concurrent modification or version
-	// conflict (e.g. an OpenBao policy changed remotely since it was
-	// read). No command in this ticket returns it.
+	// ExitConflict is returned when a local file changed on disk between
+	// being read and being written (FSM-14, `bpe format`; see
+	// internal/fileio.ErrConflict) or, in a later ticket (FSM-16), a
+	// remote OpenBao policy that changed since it was read — the same
+	// "changed since I read it" category at a different layer.
 	ExitConflict ExitCode = 4
 
 	// ExitInterrupted is returned when the user interrupts the process

@@ -35,6 +35,10 @@ type Command struct {
 	// KindTest. Empty for KindDefault's bare "start empty" form.
 	PolicyFile string
 
+	// FormatCheck is KindFormat's --check flag: report whether the file
+	// would be reformatted without writing it.
+	FormatCheck bool
+
 	// TestPath and TestCapability are the required --path/--capability
 	// values for KindTest.
 	TestPath       string
@@ -88,6 +92,11 @@ var globalFlagSpecs = map[string]flagKind{
 var testFlagSpecs = map[string]flagKind{
 	"path":       flagValue,
 	"capability": flagValue,
+}
+
+// formatFlagSpecs are the flags recognized only within `bpe format`.
+var formatFlagSpecs = map[string]flagKind{
+	"check": flagBool,
 }
 
 // scanFlags extracts every token matching a known flag in specs from args,
@@ -244,7 +253,7 @@ func ParseArgs(args []string) (*Command, error) {
 		return parseFileOnlySubcommand(KindValidate, "validate", remaining[1:], cfgFlags)
 
 	case "format":
-		return parseFileOnlySubcommand(KindFormat, "format", remaining[1:], cfgFlags)
+		return parseFormatSubcommand(remaining[1:], cfgFlags)
 
 	case "test":
 		return parseTestSubcommand(remaining[1:], cfgFlags)
@@ -282,6 +291,43 @@ func parseFileOnlySubcommand(kind Kind, name string, args []string, cfgFlags con
 		return nil, apperr.Usagef("missing required argument: <policy.hcl> (usage: bpe %s <policy.hcl>)", name)
 	case 1:
 		return &Command{Kind: kind, PolicyFile: positional[0], ConfigFlags: cfgFlags}, nil
+	default:
+		return nil, apperr.Usagef("unexpected argument: %s", positional[1])
+	}
+}
+
+// parseFormatSubcommand parses `bpe format <policy.hcl> [--check]`,
+// accepting --check before or after the positional filename, unlike
+// parseFileOnlySubcommand's other two callers (validate has no flags of
+// its own).
+func parseFormatSubcommand(args []string, cfgFlags config.Flags) (*Command, error) {
+	if hasHelpFlag(args) {
+		return &Command{Kind: KindHelp, HelpTopic: "format", ConfigFlags: cfgFlags}, nil
+	}
+
+	values, remaining, err := scanFlags(args, formatFlagSpecs)
+	if err != nil {
+		return nil, err
+	}
+
+	var positional []string
+	for _, tok := range remaining {
+		if strings.HasPrefix(tok, "-") {
+			return nil, apperr.Usagef("unknown flag: %s", tok)
+		}
+		positional = append(positional, tok)
+	}
+
+	switch len(positional) {
+	case 0:
+		return nil, apperr.Usage("missing required argument: <policy.hcl> (usage: bpe format <policy.hcl> [--check])")
+	case 1:
+		return &Command{
+			Kind:        KindFormat,
+			PolicyFile:  positional[0],
+			FormatCheck: values["check"] == "true",
+			ConfigFlags: cfgFlags,
+		}, nil
 	default:
 		return nil, apperr.Usagef("unexpected argument: %s", positional[1])
 	}

@@ -482,6 +482,9 @@ func TestValidate_Fixture_ContradictoryRequiredParameter(t *testing.T) {
 	if doc.HasErrors() {
 		t.Fatalf("HasErrors() = true, want false — this fixture is syntactically valid, only semantically contradictory: %v", doc.Diagnostics)
 	}
+	if doc.HasSyntaxError {
+		t.Error("HasSyntaxError = true, want false — this is the case FSM-14's bpe format relies on: syntactically valid HCL with contradictory permissions must still be formatable")
+	}
 
 	diags := doc.Validate()
 	d, found := findDiagnostic(diags, `requires parameter "owner" that can never be supplied`)

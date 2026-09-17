@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,9 +9,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/hashicorp/hcl/v2/hclwrite"
+
 	"github.com/kevinpinscoe/bao-policy-editor/internal/apperr"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/config"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/evaluator"
+	"github.com/kevinpinscoe/bao-policy-editor/internal/fileio"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/hclpolicy"
 	"github.com/kevinpinscoe/bao-policy-editor/internal/policy"
 )
@@ -65,9 +69,9 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 // declines to perform) the action a parsed Command names. Every branch
 // either does real, verified work or returns apperr.NotImplemented — never
 // a false success. cfg and stdin are threaded through for the commands
-// that will need them starting with FSM-13/16/14 (effective-access
-// evaluation, OpenBao connectivity, file persistence); neither is read
-// yet. stdout is read as of FSM-12, by KindValidate.
+// that will need them starting with FSM-16 (OpenBao connectivity); cfg is
+// not read yet. stdout is read as of FSM-12 (KindValidate), FSM-13
+// (KindTest), and FSM-14 (KindFormat).
 func dispatchCommand(ctx context.Context, cmd *Command, cfg config.Config, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return apperr.Interrupted()
@@ -82,7 +86,7 @@ func dispatchCommand(ctx context.Context, cmd *Command, cfg config.Config, stdin
 	case KindValidate:
 		return runValidate(cmd.PolicyFile, stdout)
 	case KindFormat:
-		return apperr.NotImplemented("policy formatting")
+		return runFormat(cmd.PolicyFile, cmd.FormatCheck, stdout)
 	case KindTest:
 		return runTest(cmd.PolicyFile, cmd.TestPath, cmd.TestCapability, stdout)
 	default:
@@ -138,6 +142,87 @@ func runValidate(policyFile string, stdout io.Writer) error {
 		return apperr.New(apperr.ExitPolicyIssue, "policy validation failed")
 	}
 	return nil
+}
+
+// runFormat implements `bpe format <policy.hcl> [--check]`: read the file
+// together with a fileio.Snapshot of it, refuse to proceed if the source
+// fails to parse as syntactically valid HCL at all, canonicalize it with
+// hclwrite.Format, and either report or write the result.
+//
+// Formatting deliberately never decodes into the policy domain model —
+// hclwrite.Format operates purely on the token stream, so it is safe to
+// run on a file with decode-time semantic errors (an unparseable
+// expiration timestamp) or unsupported content (an unknown attribute or
+// block, or contradictory permission constraints Validate would flag):
+// none of that is lost, because none of it is ever reconstructed from a
+// Policy value. doc.HasSyntaxError, not doc.HasErrors(), is therefore the
+// gate — see hclpolicy.Document's doc comment on the distinction.
+//
+// When the formatted output is byte-identical to the source, this is a
+// no-op: nothing is written, so the file's modification time is left
+// untouched, matching Kevin's instruction that formatting an
+// already-formatted file must not appear to change it.
+//
+// --check never writes regardless of the outcome; it reports whether the
+// file would change and maps that to the exit-code contract's convention
+// for a check-only formatter (0 already formatted, 1 would reformat) —
+// see the Exit Codes table in README.md.
+func runFormat(policyFile string, checkOnly bool, stdout io.Writer) error {
+	src, snap, err := fileio.Read(policyFile)
+	if err != nil {
+		return apperr.Wrap(apperr.ExitOperational, "failed to read policy file", err).WithDetail(policyFile)
+	}
+
+	doc, err := hclpolicy.Parse(policyFile, src)
+	if err != nil {
+		return apperr.Wrap(apperr.ExitOperational, "failed to parse policy file", err).WithDetail(policyFile)
+	}
+	if doc.HasSyntaxError {
+		for _, d := range doc.Diagnostics {
+			fmt.Fprintln(stdout, d.String())
+		}
+		return apperr.New(apperr.ExitPolicyIssue, "policy file has syntax errors; cannot format").WithDetail(policyFile)
+	}
+
+	formatted := hclwrite.Format(src)
+
+	if bytes.Equal(formatted, src) {
+		fmt.Fprintf(stdout, "%s: already formatted\n", policyFile)
+		return nil
+	}
+
+	if checkOnly {
+		fmt.Fprintf(stdout, "%s: not formatted\n", policyFile)
+		return apperr.New(apperr.ExitPolicyIssue, "policy file is not formatted").WithDetail(policyFile)
+	}
+
+	if err := fileio.Replace(policyFile, formatted, snap); err != nil {
+		return mapFormatWriteError(policyFile, err, stdout)
+	}
+
+	fmt.Fprintf(stdout, "%s: formatted\n", policyFile)
+	return nil
+}
+
+// mapFormatWriteError translates a fileio.Replace error into the
+// exit-code contract's convention for a detected write conflict (4) as
+// opposed to an ordinary operational failure (3) — pulled out of
+// runFormat as its own function so each fileio error kind's mapping is
+// directly testable without needing to provoke a real race, symlink, or
+// hard link on disk.
+func mapFormatWriteError(policyFile string, err error, stdout io.Writer) error {
+	var post *fileio.PostReplacementError
+	switch {
+	case errors.As(err, &post):
+		fmt.Fprintf(stdout, "%s: formatted, but a step after writing failed\n", policyFile)
+		return apperr.Wrap(apperr.ExitOperational, "policy file was formatted, but a durability step afterward failed; the new content is in place", err).WithDetail(policyFile)
+	case errors.Is(err, fileio.ErrConflict):
+		return apperr.Wrap(apperr.ExitConflict, "policy file changed on disk since it was read; refusing to overwrite", err).WithDetail(policyFile)
+	case errors.Is(err, fileio.ErrSymlink), errors.Is(err, fileio.ErrHardLinked):
+		return apperr.Wrap(apperr.ExitOperational, "cannot format this file in place", err).WithDetail(policyFile)
+	default:
+		return apperr.Wrap(apperr.ExitOperational, "failed to write formatted policy file", err).WithDetail(policyFile)
+	}
 }
 
 // runTest implements
