@@ -69,7 +69,7 @@ func TestProcess_UnknownFlagExitsUsage(t *testing.T) {
 	}
 }
 
-func TestProcess_NotImplementedExitsOperational(t *testing.T) {
+func TestProcess_MissingPolicyFileExitsOperational(t *testing.T) {
 	bin := buildBPE(t)
 	cmd := exec.Command(bin, "validate", "policy.hcl")
 	err := cmd.Run()
@@ -87,9 +87,11 @@ func TestProcess_NotImplementedExitsOperational(t *testing.T) {
 // signal.NotifyContext mechanism main.go wires up, directly, on the test
 // process itself. This is a focused unit-level test of the cancellation
 // wiring (portable per FSM-10's requirement) rather than a full end-to-end
-// subprocess signal test: the bare command is required to return
-// immediately with "not implemented yet" rather than block, so there is
-// nothing in this release for an external SIGINT to interrupt mid-flight.
+// subprocess signal test: the bare command now starts the interactive
+// editor, which needs a terminal, so signalling a real subprocess would
+// test the harness rather than the wiring. That context is handed to
+// Bubble Tea via tea.WithContext, so cancelling it is what stops the
+// editor — see internal/tui.Run.
 func TestSignalDerivedContext_CancelsOnSIGINT(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("SIGINT delivery via syscall.Kill is not portable to Windows")

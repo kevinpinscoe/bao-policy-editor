@@ -14,11 +14,18 @@ Usage:
   bpe --help                              Show this help
   bpe --version                           Show version information
 
-validate, format, and test are implemented — see bpe <command> --help for
-each command's arguments and exit codes. The interactive editor
-(bpe / bpe <policy.hcl>) is not implemented yet: it reports
-"not implemented yet" and exits non-zero rather than starting a TUI — see
-RUNBOOK.md for current limitations.
+Every command above is implemented — see bpe <command> --help for each
+one's arguments and exit codes.
+
+Running bpe with no subcommand opens the interactive editor: with a file,
+on that policy; without one, on an empty policy. Opening a file does not
+modify it. The editor lists the available keys in a footer on every
+screen, and ? shows the full key reference. It edits the file you opened
+rather than regenerating it, so comments, attributes BPE does not
+recognize, and unsupported blocks are preserved; where a value cannot be
+rewritten safely, that one field is shown read-only with the reason.
+OpenBao connectivity is not implemented yet — see RUNBOOK.md for current
+limitations.
 
 Global flags (accepted anywhere on the command line, before or after a
 command; see Configuration in README.md for precedence):

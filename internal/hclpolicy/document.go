@@ -84,6 +84,13 @@ type Document struct {
 	HasSyntaxError bool
 
 	raw *hclwrite.File
+
+	// syn is the hclsyntax parse of the same source. Parse already needs
+	// it to decode; it is kept so the editing layer (edit.go) can ask
+	// structural questions the decoded Policy cannot answer — whether an
+	// attribute is present at all as opposed to present and empty, and
+	// whether its value is a literal that can be safely rewritten.
+	syn *hclsyntax.Body
 }
 
 // HasErrors reports whether any Diagnostic in the Document is
@@ -158,6 +165,8 @@ func Parse(filename string, src []byte) (*Document, error) {
 		})
 		return doc, nil
 	}
+
+	doc.syn = body
 
 	dec := &decoder{filename: filename}
 	doc.Policy, doc.Unsupported = dec.decodeFile(body)
