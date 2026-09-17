@@ -27,7 +27,7 @@ source_path: /home/kinscoe/Projects/public/bao-policy-editor/RUNBOOK.md
 
 ## Purpose
 
-This runbook covers how to build, run, validate a policy with, format a policy file with, simulate an effective-access check against, edit interactively, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — plus HCL parsing, semantic policy validation (`bpe validate`), safe local-file formatting and persistence (`bpe format`, `internal/fileio`), effective-access simulation (`bpe test`), and the interactive terminal editor (`bpe`, `bpe <policy.hcl>`). Connection handling, TLS, and remote-policy-conflict procedures are **not documented here yet** because those features do not exist yet; documenting them now would describe behavior that doesn't exist. Local-file conflict handling (a policy file that changed on disk since it was read) is documented below, in Steps 6 and 8.
+This runbook covers how to build, run, validate a policy with, format a policy file with, simulate an effective-access check against, edit interactively, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — plus HCL parsing, semantic policy validation (`bpe validate`), safe local-file formatting and persistence (`bpe format`, `internal/fileio`), effective-access simulation (`bpe test`), and the interactive terminal editor (`bpe`, `bpe <policy.hcl>`). The OpenBao client exists as of FSM-16 (`internal/baoclient`) but **no command calls it yet** — joining it to the editor is FSM-17. So connection, TLS and remote-conflict *procedures* still describe nothing a user can run today, and are deliberately not written up as steps here; what the client does and refuses to do is documented in README.md's [Remote policies](README.md#remote-policies) section, and Step 10 below records how to exercise it without a server. Local-file conflict handling (a policy file that changed on disk since it was read) is documented below, in Steps 6 and 8.
 
 ---
 
@@ -306,14 +306,60 @@ policy is meant to be world-readable.
 
 ---
 
+### Step 10 — Exercise the OpenBao client without a server
+
+**Why:** the client is the one part of BPE that would otherwise need live
+infrastructure to have any confidence in. It does not: every path through
+it, including the failure paths, is reachable from the test suite.
+
+```bash
+go test ./internal/baoclient/... -v
+```
+
+**Expected output:** every test passes, in roughly four seconds, having
+started no process and opened no connection beyond `httptest` servers on
+the loopback interface. Nothing in the run reads a credential, a
+configuration file, or an environment variable.
+
+The tests worth knowing about by name, because they are the ones that
+answer a question someone will eventually ask:
+
+| Test | Answers |
+| --- | --- |
+| `TestUpdateSendsPatchCarryingThePreviouslyReadVersion` | Is an update really conflict-safe, and does it really use PATCH? |
+| `TestUpdateSendsOnlyThePolicyAndCas` | Could an update quietly clear a policy's `expiration` or `ttl`? |
+| `TestUpdateRefusesWithoutVersionMetadata` | What happens against a server that reports no version? |
+| `TestStaleCasMapsToConflictAndExitCodeFour` | Is a rejected check-and-set recognized across the shapes it might arrive in? |
+| `TestTheTokenNeverAppearsInAnError` | Can the token leak through an error, including one the server wrote? |
+| `TestPackageHasNoTerminalDependency` | Is the client still usable headlessly? |
+
+**One thing the suite cannot tell you.** OpenBao's API reference states
+neither the HTTP status code nor the error body for a failed
+check-and-set, so the detection is matched rather than read off a
+documented contract (see README.md's [Remote policies](README.md#remote-policies)).
+The tests cover the shapes a failure is expected to take; they cannot
+prove a live server uses one of them. The first time BPE is pointed at a
+real instance, deliberately provoke a stale write — read a policy, change
+it from another client, then save — and confirm it comes back as a
+conflict rather than as a generic failure.
+
+**If this fails:** a failure in `TestAServerErrorIsRetried` is usually a
+slow machine rather than a defect; that test is the only one that waits
+out the real retry backoff, and it is the reason the suite takes seconds
+rather than milliseconds.
+
+---
+
 ## Credential Handling
 
-`BAO_TOKEN` and any other `BAO_*` credential-bearing environment variables must never appear in logs, diagnostic output, terminal screenshots, or bug reports. `internal/config.Config` holds the resolved token as a `SensitiveString`, a type whose formatting is redacted under every `fmt` verb (`%v`, `%+v`, `%#v`, `%s`, `%q`) and in error messages; only an explicit `.Reveal()` call returns the raw value, reserved for the OpenBao client landing in a later ticket. See `README.md`'s Security section for the vulnerability-reporting process.
+`BAO_TOKEN` and any other `BAO_*` credential-bearing environment variables must never appear in logs, diagnostic output, terminal screenshots, or bug reports. `internal/config.Config` holds the resolved token as a `SensitiveString`, a type whose formatting is redacted under every `fmt` verb (`%v`, `%+v`, `%#v`, `%s`, `%q`) and in error messages; only an explicit `.Reveal()` call returns the raw value, and the sole caller is `internal/baoclient.New`, which needs it to authenticate.
+
+`internal/baoclient` keeps that guarantee on its own side: the token is sent only as the `X-Vault-Token` header, the client redacts itself under every formatting verb, the package writes nothing to the logger or to disk, and every error leaving it is scrubbed of the token — so even a server that echoes the credential back inside its own error message cannot leak it through BPE. All of that is asserted by tests rather than described; see Step 10. See `README.md`'s Security section for the vulnerability-reporting process.
 
 ---
 
 ## Maintenance Notes
 
 - **Last game-day test:** 2026-09-17 — build, `--help`/`--version`, a usage error, the interactive editor opened on a policy with comments and an unknown attribute (opened, previewed, diagnosed, rule added, rule duplicated, rule removed with its comments, saved, and the file confirmed to still carry every comment and unknown attribute), the editor started empty and saved to a new path, the editor refusing to replace an existing file, `NO_COLOR=1` confirmed to emit no colour-setting escape sequences, the editor rendered on a pty at 60, 100 and 120 columns, `bpe validate` against a clean policy, a policy with only warnings, a policy with a semantic error, a policy with a syntax error, and a missing file, `bpe format` reformatting a misindented policy, `--check` reporting both "not formatted" and "already formatted" without writing, formatting refusing a genuine syntax error while still formatting a policy with a decode-time error (bad `expiration`) unchanged in meaning, `bpe test` against an allowed request, a denied (default-deny) request, a request whose winning rule carries parameter constraints (`INCOMPLETE`, exit `3`), an unknown-capability usage error, a broader-deny-does-not-override-a-more-specific-allow regression, and a missing file, and Ctrl+C/SIGTERM interruption, all manually exercised against the built binary (FSM-14 added `format`; FSM-13 added `test`; FSM-12 covered everything but those two).
-- **Next scheduled review:** when the next real feature (OpenBao connectivity, FSM-16) lands.
-- **Known drift risks:** OpenBao connectivity does not exist yet. Connection, TLS, and remote policy-conflict procedures must be added as that feature is implemented, not backfilled from assumption. The editor's own limits are documented in README.md: a field whose value is not a plain literal is read-only rather than rewritten, the effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, and a duplicated rule is appended at the end of the file rather than inserted after the original. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.
+- **Next scheduled review:** when the OpenBao client is joined to the editor (FSM-17) and remote operations become something a user can actually run.
+- **Known drift risks:** the OpenBao client exists but nothing calls it, so connection, TLS and remote policy-conflict *procedures* must be written when FSM-17 makes them reachable — not backfilled from assumption now. Two things about the client are unproven against a live server and stay that way until one is available: the exact wire form of a failed check-and-set (OpenBao documents neither the status code nor the error body), and whether the endpoint's PATCH accepts the `application/merge-patch+json` content type the official client sends, which its API reference does not state either. Both are isolated to one constant and one matcher, and both are noted in the code at the point they matter. The editor's own limits are documented in README.md: a field whose value is not a plain literal is read-only rather than rewritten, the effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, and a duplicated rule is appended at the end of the file rather than inserted after the original. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.
