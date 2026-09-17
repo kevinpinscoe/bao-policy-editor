@@ -2,6 +2,7 @@ package hclpolicy
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
@@ -208,9 +209,21 @@ func (d *decoder) decodeParameterMap(rng hcl.Range, attrName string, val cty.Val
 	}
 
 	valueMap := val.AsValueMap()
-	out := make([]policy.ParameterValues, 0, len(valueMap))
-	for name, v := range valueMap {
-		values, ok := d.decodeStringList(rng, fmt.Sprintf("%s.%s", attrName, name), v)
+
+	// cty hands this back as a Go map, whose iteration order is
+	// randomized. Sorting by parameter name makes the decoded slice
+	// deterministic, which matters twice over: Encode's output would
+	// otherwise vary run to run, and the TUI's rule detail panel would
+	// reshuffle a rule's parameters every time the document was reparsed.
+	names := make([]string, 0, len(valueMap))
+	for name := range valueMap {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	out := make([]policy.ParameterValues, 0, len(names))
+	for _, name := range names {
+		values, ok := d.decodeStringList(rng, fmt.Sprintf("%s.%s", attrName, name), valueMap[name])
 		if !ok {
 			return nil, false
 		}
