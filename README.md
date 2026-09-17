@@ -371,6 +371,81 @@ identically to an explicitly empty flag value.
 
 Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back to their corresponding `VAULT_*` variables. Configuration resolution never reads a persistent BPE configuration file and never contacts OpenBao — no command in this release performs network access.
 
+## Remote policies
+
+BPE can read and write policies on an OpenBao server as well as local
+files. The client lives in `internal/baoclient`; **no command in this
+release uses it yet** — wiring it into the editor is FSM-17 — so nothing
+BPE currently does contacts a server.
+
+### What it needs from a token
+
+| Operation | Capability on |
+| --- | --- |
+| List policies | `list` on `sys/policies/acl` |
+| Read a policy | `read` on `sys/policies/acl/*` |
+| Create or update | `create` and `update` on `sys/policies/acl/*` |
+| Delete | `delete` on `sys/policies/acl/*` |
+
+A rejected token (401) and a token missing a capability (403) are reported
+differently, because they lead to different fixes.
+
+### Conflict safety
+
+Updates use OpenBao's own check-and-set rather than anything BPE invents.
+Reading a policy captures its `version`; updating sends that version back
+as `cas`, and the server refuses the write if the policy has changed since
+— exit code `4`.
+
+Three consequences worth knowing:
+
+- **An update is PATCH, not POST.** OpenBao resets unspecified fields to
+  their defaults on POST and preserves them on PATCH. A policy can carry
+  an `expiration`, a `ttl`, `cas_required`, or the identity-template
+  flags, none of which BPE models — so POST would silently clear whichever
+  of them were set. BPE sends exactly two fields: `policy` and `cas`.
+- **A create is POST with `cas = -1`**, OpenBao's "this must not already
+  exist" value. A policy that appeared between listing and writing is a
+  conflict, not something to overwrite.
+- **`cas_required` is read but never sent.** It is the server's own
+  per-policy setting, and turning it on would change the rules for every
+  other client of that policy on BPE's say-so.
+
+**If a server does not return usable version metadata, an update is
+refused** rather than attempted. BPE does not fall back to re-reading and
+comparing before writing: that sequence has a race between the compare and
+the write, so it would report an update as conflict-safe when it was not.
+
+**Deletion has no equivalent.** This endpoint offers no check-and-set for
+DELETE, so a delete cannot be made atomic against a concurrent change. BPE
+says so rather than implying a safety it cannot provide, and the
+confirmation for a delete belongs in the interface that asks for it.
+
+One detail is undocumented upstream: OpenBao's API reference states
+neither the HTTP status code nor the error body for a failed
+check-and-set. BPE's detection is therefore deliberately broad — 409 and
+412 on their own, and 400 only when the body names a check-and-set
+problem — and biased toward reporting a conflict, since a conflict
+misreported as a bad request invites someone to force the write.
+
+### Security behavior
+
+- The token is held in a type that redacts itself under every formatting
+  verb, is sent only as the `X-Vault-Token` header, and appears in no
+  error, no log line, and nothing written to disk. Errors leaving the
+  client are additionally scrubbed of it, so a server that echoes the
+  token back inside its own error message cannot leak it through BPE.
+- Certificate verification is **on** unless `--skip-verify` /
+  `BAO_SKIP_VERIFY` explicitly turns it off, and doing so produces a
+  warning that says what it exposes rather than noting that verification
+  is off.
+- BPE reads no secret values and never persists a token.
+- `BAO_MAX_RETRIES` has no effect. BPE resolves its own configuration and
+  disables the OpenBao client's separate environment reading, so that the
+  precedence documented under [Configuration](#configuration) is the only
+  precedence in play; the retry count is a fixed, deliberate 2 for a 5xx
+  or a connection failure, and a 4xx is never retried.
+
 ## Exit Codes
 
 | Code | Meaning | Status |
@@ -379,7 +454,7 @@ Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back 
 | `1` | `validate`: a validation failure. `test`: a denied result, or a policy it cannot trust enough to simulate against (unsupported content or decode errors). `format`: a genuine HCL syntax error, or — with `--check` only — the file would be reformatted. | Active for `validate` (FSM-12), `test` (FSM-13), and `format` (FSM-14) — corrected from an earlier, mistaken "reserved for FSM-17" note; FSM-17 is TUI/remote integration, unrelated to this exit code |
 | `2` | Command-line usage or configuration error | Active |
 | `3` | Operational failure: a policy file that could not be read, a `test` result `bpe` cannot reduce to a trustworthy decision from path and capability alone (see [Evaluation limits](#evaluation-limits)), `format` refusing to write through a symlink or a detected hard-linked file, or the interactive editor failing to start | Active |
-| `4` | A detected write conflict: the local file changed on disk between being read and being written (see [File writes](#file-writes)). The interactive editor reports this on screen and keeps your edits rather than exiting | Active for `format` (FSM-14); also reserved for a future remote OpenBao version/CAS conflict (FSM-16) — the same category of problem at a different layer |
+| `4` | A detected write conflict: the local file changed on disk between being read and being written (see [File writes](#file-writes)), or a remote check-and-set write was rejected because the policy changed on the server (see [Remote policies](#remote-policies)). The interactive editor reports the local case on screen and keeps your edits rather than exiting | Active |
 | `130` | Interrupted by the user (Ctrl+C or SIGTERM) | Active |
 
 ## Common Commands
@@ -429,7 +504,7 @@ bao-policy-editor/
 │   ├── policy/               # UI-independent policy domain model
 │   ├── hclpolicy/            # HCL parsing, validation, generation, and surgical editing
 │   ├── evaluator/             # Matching and effective-access simulation
-│   ├── baoclient/             # OpenBao API integration
+│   ├── baoclient/             # OpenBao API client — policies, check-and-set, no terminal dependency
 │   ├── config/                # Environment and file configuration
 │   ├── fileio/                 # Safe local file persistence — atomic writes, conflict detection
 │   └── apperr/                 # Structured application errors and the exit-code contract
@@ -447,7 +522,7 @@ bao-policy-editor/
 
 ## How It Works
 
-The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL — and edits HCL in place, applying one attribute, label, or block change to the parsed token stream so that everything it was not asked to change survives byte for byte; the TUI is an editable projection of that document rather than a second copy of it. `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API. `fileio` reads a local file together with a snapshot of its on-disk state and later replaces it only if that state has not changed — the shared local-persistence primitive `bpe format` uses today and the TUI's save and `baoclient`'s local side will reuse later; it is local-filesystem only; remote OpenBao CAS handling stays `baoclient`'s concern. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), help text (`help.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
+The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL — and edits HCL in place, applying one attribute, label, or block change to the parsed token stream so that everything it was not asked to change survives byte for byte; the TUI is an editable projection of that document rather than a second copy of it. `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API, using the endpoint's native check-and-set so an update cannot silently overwrite someone else's change; it deliberately depends on nothing terminal-related, so the editor is built against its interface rather than the other way round. `fileio` reads a local file together with a snapshot of its on-disk state and later replaces it only if that state has not changed — the shared local-persistence primitive `bpe format` uses today and the TUI's save and `baoclient`'s local side will reuse later; it is local-filesystem only; remote OpenBao CAS handling stays `baoclient`'s concern. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), help text (`help.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
 
 ```text
 Local HCL file ─┐
@@ -463,12 +538,13 @@ OpenBao API ─────┘
 ## Testing
 
 - Add table-driven tests and HCL fixtures for policy behavior and regressions.
-- Tests must not require access to a live OpenBao server unless explicitly marked as integration tests.
+- Tests must not require access to a live OpenBao server unless explicitly marked as integration tests. `internal/baoclient` is tested entirely against `httptest`: no test in it needs a server, a network, or a credential, and the token it uses is an obviously synthetic string.
 - CLI argument parsing, configuration precedence, and command dispatch (help/usage/exit codes/cancellation) are covered by table-driven tests in `cmd/bpe` and `internal/config` that call Go functions directly rather than invoking a subprocess. A small number of process-level tests in `cmd/bpe` verify end-to-end exit-code behavior through the compiled binary.
 - `internal/fileio`'s atomic write, permission preservation, and conflict detection (content change, deletion, replacement, permission change) are covered by table-driven tests using `t.TempDir()`; none touch a real user file.
 - `internal/hclpolicy`'s editing layer carries losslessness tests: a no-op open and close, comments before, inside and after a block, unknown top-level and in-block content, duplicate path blocks, expression-valued attributes, and each of rename, capability toggle, add, duplicate and remove. Each asserts on the resulting bytes, because "nothing was lost" is a statement about the file rather than about the domain model.
 - `internal/tui` is tested by driving the root model's `Update` with synthesized key presses, exactly as the runtime would: navigation, applying and cancelling a form, add, duplicate, remove-with-confirmation, quit-with-unsaved-changes, the save review, an external-change conflict with the edits retained, and a read-only document refusing every editing action. No test needs a TTY, and none touches a file outside its own `t.TempDir()`.
 - Every screen is rendered at 40, 60 and 100 columns and asserted not to emit a line wider than the terminal.
+- `internal/baoclient` pins its two security properties rather than describing them: the token appears in no error across every failure path and every operation — including when the server echoes it back, parseably or not — in no formatting verb on the client, in no log output, and in nothing written to disk; and the package imports nothing terminal-related, checked by parsing its own imports.
 
 ## Build and Release
 
@@ -486,7 +562,7 @@ See [`RUNBOOK.md`](RUNBOOK.md) for operational procedures.
 
 Common connection, TLS, terminal-rendering, logging, and recovery procedures belong in [`RUNBOOK.md`](RUNBOOK.md). Operational guidance there is still under development until those features exist.
 
-**Current limitations:** OpenBao connectivity is not implemented — no command in this release contacts a server, and the `BAO_*`/`VAULT_*` configuration is resolved but unused. HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), effective-access simulation (FSM-13, `bpe test`), safe local-file formatting and persistence (FSM-14, `bpe format`, `internal/fileio`), and the interactive editor (FSM-15) are implemented — `bpe test` with the scope limits in [Evaluation limits](#evaluation-limits), and local writes with the guarantees and caveats in [File writes](#file-writes).
+**Current limitations:** no command in this release contacts a server. The OpenBao client exists and is tested (FSM-16, `internal/baoclient` — see [Remote policies](#remote-policies)), but nothing calls it yet; joining it to the editor is FSM-17, and until then the `BAO_*`/`VAULT_*` configuration is resolved and unused. HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), effective-access simulation (FSM-13, `bpe test`), safe local-file formatting and persistence (FSM-14, `bpe format`, `internal/fileio`), and the interactive editor (FSM-15) are implemented — `bpe test` with the scope limits in [Evaluation limits](#evaluation-limits), and local writes with the guarantees and caveats in [File writes](#file-writes).
 
 Three limits of the editor worth knowing before you meet them:
 
