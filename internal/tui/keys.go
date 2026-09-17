@@ -1,6 +1,10 @@
 package tui
 
-import "strings"
+import (
+	"strings"
+
+	"charm.land/lipgloss/v2"
+)
 
 // hint is one entry in the command footer: the key to press and what it
 // does.
@@ -13,17 +17,65 @@ import "strings"
 type hint struct {
 	Key   string
 	Label string
+
+	// Short is an abbreviated label, used when the full ones do not fit
+	// the terminal. Empty means Label is already short enough.
+	Short string
 }
 
-// renderHints lays the footer out on one line, truncated to width rather
-// than wrapped — a wrapped footer steals a row from the content on
-// exactly the narrow terminals where rows are scarcest.
+func (h hint) short() string {
+	if h.Short != "" {
+		return h.Short
+	}
+	return h.Label
+}
+
+// labelStyle is how much of each hint renderHints is currently willing to
+// show.
+type labelStyle int
+
+const (
+	fullLabels labelStyle = iota
+	shortLabels
+	keysOnly
+)
+
+// renderHints lays the footer out on one line, shortening rather than
+// wrapping.
+//
+// A second footer row would steal content from exactly the narrow
+// terminals where rows are scarcest, and truncating the line silently
+// loses its last entries — which in the editor's case are "save" and
+// "quit", the two nobody can afford not to see. So it gives up detail
+// instead: full labels, then abbreviated ones, then the keys alone. Every
+// key stays visible at every width, and the help screen always has the
+// full list.
 func renderHints(st Styles, hints []hint, width int) string {
+	for _, style := range []labelStyle{fullLabels, shortLabels, keysOnly} {
+		if line := joinHints(st, hints, style); lipgloss.Width(line) <= width {
+			return line
+		}
+	}
+	return truncate(joinHints(st, hints, keysOnly), width)
+}
+
+func joinHints(st Styles, hints []hint, style labelStyle) string {
 	parts := make([]string, 0, len(hints))
 	for _, h := range hints {
-		parts = append(parts, st.FooterKey.Render(h.Key)+" "+st.Footer.Render(h.Label))
+		switch style {
+		case fullLabels:
+			parts = append(parts, st.FooterKey.Render(h.Key)+" "+st.Footer.Render(h.Label))
+		case shortLabels:
+			parts = append(parts, st.FooterKey.Render(h.Key)+" "+st.Footer.Render(h.short()))
+		default:
+			parts = append(parts, st.FooterKey.Render(h.Key))
+		}
 	}
-	return truncate(strings.Join(parts, st.Footer.Render("  ·  ")), width)
+	separator := "  ·  "
+	if style != fullLabels {
+		separator = " · "
+	}
+	return strings.Join(parts, st.Footer.Render(separator))
 }
 
 // Key bindings, gathered here so the help screen and the footers cannot
@@ -35,53 +87,54 @@ func renderHints(st Styles, hints []hint, width int) string {
 // advertised in the footers.
 var (
 	editorHints = []hint{
-		{"↑/↓", "select rule"},
-		{"enter", "edit"},
-		{"a", "add"},
-		{"d", "duplicate"},
-		{"x", "remove"},
-		{"p", "preview"},
-		{"g", "diagnostics"},
-		{"t", "test access"},
-		{"s", "save"},
-		{"?", "help"},
-		{"q", "quit"},
+		{Key: "↑/↓", Label: "select rule", Short: "move"},
+		{Key: "enter", Label: "edit"},
+		{Key: "a", Label: "add"},
+		{Key: "d", Label: "duplicate", Short: "dup"},
+		{Key: "x", Label: "remove", Short: "del"},
+		{Key: "p", Label: "preview", Short: "hcl"},
+		{Key: "g", Label: "diagnostics", Short: "diag"},
+		{Key: "t", Label: "test access", Short: "test"},
+		{Key: "s", Label: "save"},
+		{Key: "?", Label: "help"},
+		{Key: "q", Label: "quit"},
 	}
 
 	formHints = []hint{
-		{"tab/↑/↓", "move between fields"},
-		{"space", "toggle capability"},
-		{"enter", "open field"},
-		{"ctrl+s", "apply"},
-		{"esc", "cancel"},
+		{Key: "tab/↑/↓", Label: "move between fields", Short: "move"},
+		{Key: "space", Label: "toggle capability", Short: "toggle"},
+		{Key: "enter", Label: "open field", Short: "open"},
+		{Key: "ctrl+d", Label: "unset field", Short: "unset"},
+		{Key: "ctrl+s", Label: "apply"},
+		{Key: "esc", Label: "cancel"},
 	}
 
 	listHints = []hint{
-		{"↑/↓", "scroll"},
-		{"pgup/pgdn", "page"},
-		{"esc", "back"},
+		{Key: "↑/↓", Label: "scroll"},
+		{Key: "pgup/pgdn", Label: "page"},
+		{Key: "esc", Label: "back"},
 	}
 
 	reviewHints = []hint{
-		{"↑/↓", "scroll"},
-		{"ctrl+s", "write the file"},
-		{"esc", "back"},
+		{Key: "↑/↓", Label: "scroll"},
+		{Key: "ctrl+s", Label: "write the file", Short: "write"},
+		{Key: "esc", Label: "back"},
 	}
 
 	testHints = []hint{
-		{"tab", "switch field"},
-		{"←/→", "choose capability"},
-		{"enter", "run the check"},
-		{"esc", "back"},
+		{Key: "tab", Label: "switch field", Short: "field"},
+		{Key: "←/→", Label: "choose capability", Short: "capability"},
+		{Key: "enter", Label: "run the check", Short: "run"},
+		{Key: "esc", Label: "back"},
 	}
 
 	paramHints = []hint{
-		{"↑/↓", "select"},
-		{"enter", "edit"},
-		{"a", "add"},
-		{"x", "remove"},
-		{"ctrl+s", "apply"},
-		{"esc", "cancel"},
+		{Key: "↑/↓", Label: "select"},
+		{Key: "enter", Label: "edit"},
+		{Key: "a", Label: "add"},
+		{Key: "x", Label: "remove", Short: "del"},
+		{Key: "ctrl+s", Label: "apply"},
+		{Key: "esc", Label: "cancel"},
 	}
 )
 
@@ -93,30 +146,32 @@ var helpSections = []struct {
 	Keys  []hint
 }{
 	{"Moving around", []hint{
-		{"↑ / ↓", "move the selection (j / k also work)"},
-		{"tab / shift+tab", "move between fields in a form"},
-		{"pgup / pgdn", "page through a long view"},
-		{"home / end", "jump to the start or end of a long view"},
-		{"enter", "open the selected thing"},
-		{"esc", "go back, or cancel the current form"},
-		{"mouse", "click a rule to select it; the wheel scrolls"},
+		{Key: "↑ / ↓", Label: "move the selection (j / k also work)"},
+		{Key: "tab / shift+tab", Label: "move between fields in a form"},
+		{Key: "pgup / pgdn", Label: "page through a long view"},
+		{Key: "home / end", Label: "jump to the start or end of a long view"},
+		{Key: "enter", Label: "open the selected thing"},
+		{Key: "esc", Label: "go back, or cancel the current form"},
+		{Key: "mouse", Label: "click a rule to select it; the wheel scrolls"},
 	}},
 	{"Working with rules", []hint{
-		{"a", "add a new rule"},
-		{"enter", "edit the selected rule"},
-		{"d", "duplicate the selected rule, comments and all"},
-		{"x", "remove the selected rule"},
-		{"space", "toggle the highlighted capability in the rule form"},
+		{Key: "a", Label: "add a new rule"},
+		{Key: "enter", Label: "edit the selected rule"},
+		{Key: "d", Label: "duplicate the selected rule, comments and all"},
+		{Key: "x", Label: "remove the selected rule"},
+		{Key: "space", Label: "toggle the highlighted capability in the rule form"},
+		{Key: "ctrl+d", Label: "unset a field in the rule form — removes the attribute rather than emptying it"},
+		{Key: "ctrl+s", Label: "apply the form"},
 	}},
 	{"Looking at the policy", []hint{
-		{"p", "preview the generated HCL"},
-		{"g", "list validation diagnostics"},
-		{"t", "test effective access for a path and capability"},
+		{Key: "p", Label: "preview the generated HCL"},
+		{Key: "g", Label: "list validation diagnostics"},
+		{Key: "t", Label: "test effective access for a path and capability"},
 	}},
 	{"Saving and leaving", []hint{
-		{"s", "review the pending changes, then save"},
-		{"ctrl+s", "write the file from the review screen"},
-		{"q / ctrl+c", "quit, with confirmation when there are unsaved changes"},
-		{"?", "show this help"},
+		{Key: "s", Label: "review the pending changes, then save"},
+		{Key: "ctrl+s", Label: "write the file from the review screen"},
+		{Key: "q / ctrl+c", Label: "quit, with confirmation when there are unsaved changes"},
+		{Key: "?", Label: "show this help"},
 	}},
 }

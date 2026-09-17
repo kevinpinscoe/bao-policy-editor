@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/kevinpinscoe/bao-policy-editor/internal/hclpolicy"
@@ -32,7 +33,7 @@ func (m *Model) render() string {
 		content = m.form.View(m.styles, m.width)
 		hints = formHints
 		if m.form.editing {
-			hints = append([]hint{{"enter", "finish typing"}}, formHints...)
+			hints = append([]hint{{Key: "enter", Label: "finish typing"}}, formHints...)
 		}
 
 	case screenParams:
@@ -45,7 +46,7 @@ func (m *Model) render() string {
 
 	case screenSavePath:
 		content = m.renderSavePath()
-		hints = []hint{{"enter", "write the file"}, {"esc", "back"}}
+		hints = []hint{{Key: "enter", Label: "write the file"}, {Key: "esc", Label: "back"}}
 
 	case screenPreview:
 		content = m.renderScrollScreen("HCL preview — the document exactly as it would be written")
@@ -63,22 +64,60 @@ func (m *Model) render() string {
 		content = m.renderScrollScreen(m.reviewTitle())
 		hints = reviewHints
 		if m.reviewingConflict {
-			hints = []hint{{"esc", "back"}, {"↑/↓", "scroll"}}
+			hints = []hint{{Key: "esc", Label: "back"}, {Key: "↑/↓", Label: "scroll"}}
 		}
 	}
 
-	return strings.Join([]string{content, m.renderStatus(), renderHints(m.styles, hints, m.width)}, "\n")
+	return m.frame(content, m.renderStatus(), renderHints(m.styles, hints, m.width))
+}
+
+// frame lays the window out with the status line and the footer pinned to
+// the bottom, padding the content to fill whatever is left.
+//
+// Pinning matters because the editor runs full-window: without it the
+// footer floats directly under the content and moves up and down the
+// screen as the rule list grows and shrinks, which makes the one row the
+// user is meant to glance at the one row that is never in the same place.
+// Content taller than the window is truncated from the bottom rather than
+// allowed to push the footer off the screen — every screen that can hold
+// more than a window's worth scrolls in a viewport instead.
+func (m *Model) frame(content, status, footer string) string {
+	lines := strings.Split(content, "\n")
+
+	available := max(1, m.height-2)
+	if len(lines) > available {
+		lines = lines[:available]
+	}
+	for len(lines) < available {
+		lines = append(lines, "")
+	}
+
+	lines = append(lines, status, footer)
+	return strings.Join(lines, "\n")
 }
 
 // renderScrollScreen wraps the shared viewport with a title and a scroll
 // position, so a long preview or diff says how much of it is off-screen.
 func (m *Model) renderScrollScreen(title string) string {
 	header := m.styles.Title.Render(truncate(title, m.width))
-	position := ""
-	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		position = m.styles.Dim.Render(fmt.Sprintf("  %d%%", int(m.viewport.ScrollPercent()*100)))
+	return header + m.styles.Dim.Render(m.scrollPosition()) + "\n" + m.viewport.View()
+}
+
+// scrollPosition says whether there is more to see, in words rather than
+// as a bare percentage — "0%" at the top of a long document reads as an
+// empty progress bar rather than as an invitation to scroll.
+func (m *Model) scrollPosition() string {
+	if m.viewport.TotalLineCount() <= m.viewport.VisibleLineCount() {
+		return ""
 	}
-	return header + position + "\n" + m.viewport.View()
+	switch {
+	case m.viewport.AtTop():
+		return "  ↓ more below"
+	case m.viewport.AtBottom():
+		return "  ↑ end"
+	default:
+		return fmt.Sprintf("  %d%%", int(m.viewport.ScrollPercent()*100))
+	}
 }
 
 func (m *Model) diagnosticsTitle() string {
@@ -100,8 +139,11 @@ func (m *Model) reviewTitle() string {
 		return fmt.Sprintf("What changed on disk — %d added, %d removed, against your version",
 			added, removed)
 	}
+	// The base name, not the full path: the header already shows where the
+	// file is, and a long path pushes the counts — the part this title
+	// exists for — off the end of the line.
 	return fmt.Sprintf("Review before saving %s — %d added, %d removed",
-		m.session.Filename(), added, removed)
+		filepath.Base(m.session.Filename()), added, removed)
 }
 
 // renderStatus shows the last thing that happened, or the last thing that
@@ -226,7 +268,7 @@ func (m *Model) renderDialog() string {
 				added, pluralize("line", added), removed, m.session.Filename()),
 			"Quitting now loses them.",
 		}
-		choices = []hint{{"s", "review and save"}, {"d", "discard and quit"}, {"esc", "keep editing"}}
+		choices = []hint{{Key: "s", Label: "review and save"}, {Key: "d", Label: "discard and quit"}, {Key: "esc", Label: "keep editing"}}
 
 	case dialogRemove:
 		title = "Remove this rule?"
@@ -245,7 +287,7 @@ func (m *Model) renderDialog() string {
 				strings.Join(m.pendingRemoval.NestedBlocks, ", ")+".")
 		}
 		body = append(body, "Nothing is written to disk until you save.")
-		choices = []hint{{"y", "remove it"}, {"esc", "keep it"}}
+		choices = []hint{{Key: "y", Label: "remove it"}, {Key: "esc", Label: "keep it"}}
 
 	case dialogConflict:
 		title = "The file changed on disk"
@@ -255,9 +297,9 @@ func (m *Model) renderDialog() string {
 			"Your edits are still here and have not been touched.",
 		}
 		choices = []hint{
-			{"v", "see what changed on disk"},
-			{"r", "reload from disk (discards your edits)"},
-			{"esc", "cancel and keep editing"},
+			{Key: "v", Label: "see what changed on disk"},
+			{Key: "r", Label: "reload from disk (discards your edits)"},
+			{Key: "esc", Label: "cancel and keep editing"},
 		}
 	}
 

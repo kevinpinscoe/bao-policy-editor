@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -109,18 +110,22 @@ func (t *accessTest) run(session *Session) {
 	doc := session.Document()
 	switch {
 	case doc.HasErrors():
-		t.problem = "this policy has errors, so BPE cannot simulate access against it — see the diagnostics screen"
+		t.problem = "this policy has errors, so BPE cannot simulate access against it — the diagnostics screen (g) names them"
 		return
 	case doc.Unsupported:
 		// The same refusal `bpe test` makes, for the same reason: the
 		// decoded policy is only part of what OpenBao would enforce, so a
 		// confident answer from it would be a misleading one.
-		t.problem = "this policy contains content BPE cannot fully represent, so a simulated decision would not be trustworthy"
+		t.problem = "this policy contains content BPE cannot fully represent, so a simulated decision would not " +
+			"be trustworthy — the diagnostics screen (g) names what"
 		return
 	}
 
+	// The source is named by the file's base name rather than its full
+	// path: a session edits one policy, so the directories add nothing to
+	// the explanation and push the useful part off a narrow screen.
 	ev, err := evaluator.Compile([]evaluator.NamedPolicy{{
-		Source: evaluator.Source{Name: session.Filename()},
+		Source: evaluator.Source{Name: filepath.Base(session.Filename())},
 		Policy: doc.Policy,
 	}}, time.Now())
 	if err != nil {

@@ -95,6 +95,25 @@ func truncate(s string, width int) string {
 	return string(runes) + "…"
 }
 
+// truncateLeft shortens s from the front, which is what a filesystem path
+// wants: the tail names the file, and the head is the part nobody needs.
+func truncateLeft(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width <= 1 {
+		return "…"
+	}
+	runes := []rune(s)
+	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > width {
+		runes = runes[1:]
+	}
+	return "…" + string(runes)
+}
+
 // pad right-pads s to width, so columns line up without a table library.
 func pad(s string, width int) string {
 	w := lipgloss.Width(s)

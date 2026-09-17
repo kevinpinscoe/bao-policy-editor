@@ -24,6 +24,12 @@ func (f *ruleForm) View(st Styles, width int) string {
 	b.WriteString("\n\n")
 
 	for i, row := range f.rows() {
+		// A group heading above the nine capability rows, so the indented
+		// checkboxes belong to something named rather than floating under
+		// the path field.
+		if row.kind == rowCapability && row.capability == policy.Capabilities[0] {
+			b.WriteString("  " + st.Label.Render("capabilities") + "\n")
+		}
 		b.WriteString(f.renderRow(st, row, i == f.cursor, width))
 		b.WriteString("\n")
 	}

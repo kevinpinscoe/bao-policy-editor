@@ -36,7 +36,10 @@ func renderEditor(st Styles, s *Session, selected, height, width int) (string, i
 		listHeight := max(3, bodyHeight/2)
 		list := renderRuleList(st, s, selected, listHeight, width)
 		details := renderRuleDetails(st, s, selected, width)
-		return header + "\n" + list + "\n" + details, headerLines + 1
+		// A blank line between them: stacked, there is no vertical rule to
+		// separate the list from the details, and without it the first
+		// detail row reads as another entry in the list.
+		return header + "\n" + list + "\n\n" + details, headerLines + 1
 	}
 
 	detailWidth := width - listColumnWidth - 3
@@ -80,7 +83,9 @@ func renderHeader(st Styles, s *Session, width int) string {
 	rules := s.Document().RuleCount()
 	flags = append(flags, st.Dim.Render(fmt.Sprintf("%d %s", rules, pluralize("rule", rules))))
 
-	line := st.Title.Render(truncate(name, max(10, width-40))) + "  " + strings.Join(flags, st.Dim.Render(" · "))
+	// The filename is truncated from the left: the tail names the file,
+	// and a path's leading directories are the part nobody is reading.
+	line := st.Title.Render(truncateLeft(name, max(10, width-40))) + "  " + strings.Join(flags, st.Dim.Render(" · "))
 	out := truncate(line, width)
 
 	if reason := s.ReadOnlyReason(); reason != "" {

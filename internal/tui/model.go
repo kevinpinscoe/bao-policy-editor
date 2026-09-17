@@ -94,6 +94,10 @@ func New(session *Session) *Model {
 		savePath: newInput("path to write the policy to"),
 	}
 	m.viewport.MouseWheelEnabled = true
+	// Fill the viewport's full height with blank lines rather than
+	// emitting only the lines it has. Without this a short preview leaves
+	// whatever the previous screen drew showing underneath it.
+	m.viewport.FillHeight = true
 	m.savePath.SetValue(SuggestSavePath())
 	return m
 }
