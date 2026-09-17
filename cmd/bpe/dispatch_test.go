@@ -77,7 +77,6 @@ func TestExecute_UnimplementedReturnsOperationalExitCode(t *testing.T) {
 		nil,
 		{"policy.hcl"},
 		{"format", "policy.hcl"},
-		{"test", "policy.hcl", "--path", "secret/data/x", "--capability", "read"},
 	}
 
 	for _, args := range cases {
@@ -210,6 +209,125 @@ func TestExecute_Validate_SyntaxError_ExitPolicyIssue(t *testing.T) {
 	}
 }
 
+func TestExecute_Test_UnknownCapability_ExitUsage(t *testing.T) {
+	path := writePolicyFile(t, "clean.hcl", "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", path, "--path", "secret/data/foo", "--capability", "frobnicate"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitUsage) {
+		t.Errorf("exit code = %d, want %d — an unknown --capability is a usage error, validated before the file is even read", code, apperr.ExitUsage)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty for a usage error", stdout.String())
+	}
+}
+
+func TestExecute_Test_FileNotFound(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", filepath.Join(t.TempDir(), "missing.hcl"), "--path", "secret/data/foo", "--capability", "read"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitOperational) {
+		t.Errorf("exit code = %d, want %d", code, apperr.ExitOperational)
+	}
+	if !strings.Contains(stderr.String(), "failed to read policy file") {
+		t.Errorf("stderr = %q, want it to say the file could not be read", stderr.String())
+	}
+}
+
+func TestExecute_Test_Allowed_ExitSuccess(t *testing.T) {
+	path := writePolicyFile(t, "clean.hcl", "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", path, "--path", "secret/data/foo", "--capability", "read"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitSuccess) {
+		t.Errorf("exit code = %d, want %d; stderr = %q", code, apperr.ExitSuccess, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "ALLOWED") {
+		t.Errorf("stdout = %q, want the explanation to say ALLOWED", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty on success", stderr.String())
+	}
+}
+
+func TestExecute_Test_Denied_ExitPolicyIssue(t *testing.T) {
+	path := writePolicyFile(t, "clean.hcl", "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", path, "--path", "secret/data/foo", "--capability", "update"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitPolicyIssue) {
+		t.Errorf("exit code = %d, want %d", code, apperr.ExitPolicyIssue)
+	}
+	if !strings.Contains(stdout.String(), "DENIED") {
+		t.Errorf("stdout = %q, want the explanation to say DENIED", stdout.String())
+	}
+}
+
+func TestExecute_Test_IncompleteEvaluation_ExitOperational(t *testing.T) {
+	path := writePolicyFile(t, "constrained.hcl", "path \"secret/data/foo\" {\n  capabilities = [\"create\"]\n  required_parameters = [\"owner\"]\n}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", path, "--path", "secret/data/foo", "--capability", "create"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitOperational) {
+		t.Errorf("exit code = %d, want %d — a parameter-constrained winning rule cannot be reduced to a trustworthy decision from path+capability alone", code, apperr.ExitOperational)
+	}
+	if !strings.Contains(stdout.String(), "INCOMPLETE") {
+		t.Errorf("stdout = %q, want the explanation to say INCOMPLETE", stdout.String())
+	}
+}
+
+// TestExecute_Test_UnsupportedAttribute_NeverAllowsUnconditionally is
+// regression-review point 2, 2026-09-17: an unsupported attribute that
+// might be authorization-affecting must remain visible to bpe test (its
+// diagnostic printed, not dropped in the HCL-to-domain-model conversion)
+// and must never let the request print an unconditional ALLOWED. The
+// policy here grants exactly the requested capability on exactly the
+// requested path — if bpe test evaluated the incomplete decoded Policy
+// anyway, it would confidently say ALLOWED; it must refuse instead.
+func TestExecute_Test_UnsupportedAttribute_NeverAllowsUnconditionally(t *testing.T) {
+	path := writePolicyFile(t, "unsupported.hcl", "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n  future_option = \"nope\"\n}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", path, "--path", "secret/data/foo", "--capability", "read"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitPolicyIssue) {
+		t.Errorf("exit code = %d, want %d — content bpe cannot fully represent must block a decision, not be silently dropped", code, apperr.ExitPolicyIssue)
+	}
+	if !strings.Contains(stdout.String(), "future_option") {
+		t.Errorf("stdout = %q, want the unsupported-attribute diagnostic printed, not dropped", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "ALLOWED") {
+		t.Errorf("stdout = %q, must never print ALLOWED when unsupported content could be authorization-affecting", stdout.String())
+	}
+}
+
+// TestExecute_Test_UnsupportedBlock_NeverAllowsUnconditionally is the
+// same regression as above, for a top-level unsupported BLOCK rather
+// than an unsupported attribute within a path block — a different code
+// path in hclpolicy's decoder (FSM-11), so it earns its own case rather
+// than assuming the attribute case covers it.
+func TestExecute_Test_UnsupportedBlock_NeverAllowsUnconditionally(t *testing.T) {
+	src := "path \"secret/data/foo\" {\n  capabilities = [\"read\"]\n}\n\nunknown_block \"example\" {\n  some_attribute = \"value\"\n}\n"
+	path := writePolicyFile(t, "unsupported-block.hcl", src)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"test", path, "--path", "secret/data/foo", "--capability", "read"}, nil, &stdout, &stderr, noEnv)
+
+	if code != int(apperr.ExitPolicyIssue) {
+		t.Errorf("exit code = %d, want %d", code, apperr.ExitPolicyIssue)
+	}
+	if !strings.Contains(stdout.String(), "unknown_block") {
+		t.Errorf("stdout = %q, want the unsupported-block diagnostic printed, not dropped", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "ALLOWED") {
+		t.Errorf("stdout = %q, must never print ALLOWED when unsupported content could be authorization-affecting", stdout.String())
+	}
+}
+
 func TestExecute_NoSensitiveValuesInOutput(t *testing.T) {
 	const secret = "s.SyntheticExecuteTestToken"
 	env := func(key string) (string, bool) {
@@ -224,7 +342,8 @@ func TestExecute_NoSensitiveValuesInOutput(t *testing.T) {
 		{"--version"},
 		{"validate"},          // usage error
 		{"validate", "x.hcl"}, // x.hcl does not exist — a read failure
-		{"--bogus"},           // usage error
+		{"test", "x.hcl", "--path", "secret/data/foo", "--capability", "read"}, // x.hcl does not exist — a read failure
+		{"--bogus"}, // usage error
 	}
 
 	for _, args := range invocations {
