@@ -14,20 +14,20 @@ source_path: /home/kinscoe/Projects/public/bao-policy-editor/RUNBOOK.md
 
 ## Metadata
 
-| Field                 | Value                                               |
-| --------------------- | --------------------------------------------------- |
-| **Owner**             | Kevin Inscoe                                        |
-| **Last Updated**      | 2026-09-16                                          |
-| **Last Tested**       | 2026-09-16 — build, CLI, and interruption verified  |
-| **Expected Duration** | N/A                                                 |
-| **Risk Level**        | Medium                                              |
-| **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor> |
+| Field                 | Value                                                          |
+| --------------------- | -------------------------------------------------------------- |
+| **Owner**             | Kevin Inscoe                                                   |
+| **Last Updated**      | 2026-09-17                                                     |
+| **Last Tested**       | 2026-09-17 — build, CLI, `validate`, and interruption verified |
+| **Expected Duration** | N/A                                                            |
+| **Risk Level**        | Medium                                                         |
+| **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor>            |
 
 ---
 
 ## Purpose
 
-This runbook covers how to build, run, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — with no policy domain behavior yet; every command either parses its arguments correctly and reports "not implemented yet", or shows help/version output. This document is intentionally minimal and will grow section by section as real features land. Connection handling, TLS, recovery, and policy-conflict procedures are **not documented here yet** because those features do not exist yet; documenting them now would describe behavior that doesn't exist.
+This runbook covers how to build, run, validate a policy with, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — plus HCL parsing and semantic policy validation, reachable through `bpe validate`; every other command still parses its arguments correctly and reports "not implemented yet", or shows help/version output. This document is intentionally minimal and will grow section by section as real features land. Connection handling, TLS, recovery, and policy-conflict procedures are **not documented here yet** because those features do not exist yet; documenting them now would describe behavior that doesn't exist.
 
 ---
 
@@ -109,6 +109,21 @@ exit code `3`. `./bin/bpe --version` prints a version line and exits `0`; `./bin
 
 ---
 
+### Step 4 — Diagnose a policy validation result
+
+**Why:** confirms `bpe validate` reads the file, reports findings with their severity, and exits with the documented code rather than silently passing or failing.
+
+```bash
+./bin/bpe validate testdata/policies/valid.hcl
+./bin/bpe validate testdata/policies/invalid_syntax.hcl
+```
+
+**Expected output:** for `valid.hcl`, `testdata/policies/valid.hcl: no issues found` and exit code `0`. For `invalid_syntax.hcl`, one or more `filename:line:column: error: ...` lines on standard output and exit code `1`. A policy with only warnings (e.g. a rule using `sudo`) prints them but still exits `0` — warnings never fail validation. A missing or unreadable file prints `failed to read policy file: ...` on standard error and exits `3`.
+
+**If this fails:** confirm the binary was rebuilt (`go build -o ./bin/bpe ./cmd/bpe`), and that the path given actually exists relative to the current working directory.
+
+---
+
 ## Credential Handling
 
 `BAO_TOKEN` and any other `BAO_*` credential-bearing environment variables must never appear in logs, diagnostic output, terminal screenshots, or bug reports. `internal/config.Config` holds the resolved token as a `SensitiveString`, a type whose formatting is redacted under every `fmt` verb (`%v`, `%+v`, `%#v`, `%s`, `%q`) and in error messages; only an explicit `.Reveal()` call returns the raw value, reserved for the OpenBao client landing in a later ticket. See `README.md`'s Security section for the vulnerability-reporting process.
@@ -117,6 +132,6 @@ exit code `3`. `./bin/bpe --version` prints a version line and exits `0`; `./bin
 
 ## Maintenance Notes
 
-- **Last game-day test:** 2026-09-16 — build, `--help`/`--version`, a usage error, an unimplemented-command error, and Ctrl+C/SIGTERM interruption all manually exercised against the built binary (FSM-10).
-- **Next scheduled review:** when the first real TUI feature (local policy load/edit) lands.
-- **Known drift risks:** this runbook describes the CLI/application foundation only — no HCL parsing, validation, formatting, capability testing, file persistence, or OpenBao connectivity exists yet. Connection, TLS, recovery, and policy-conflict procedures must be added as those features are implemented, not backfilled from assumption.
+- **Last game-day test:** 2026-09-17 — build, `--help`/`--version`, a usage error, an unimplemented-command error, `bpe validate` against a clean policy, a policy with only warnings, a policy with a semantic error, a policy with a syntax error, and a missing file, and Ctrl+C/SIGTERM interruption, all manually exercised against the built binary (FSM-12; FSM-10 covered everything but `validate`).
+- **Next scheduled review:** when the next real feature (the effective-access evaluator, FSM-13, or local-file persistence, FSM-14) lands.
+- **Known drift risks:** formatting, capability testing, file persistence, and OpenBao connectivity do not exist yet. Connection, TLS, recovery, and policy-conflict procedures must be added as those features are implemented, not backfilled from assumption. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth.

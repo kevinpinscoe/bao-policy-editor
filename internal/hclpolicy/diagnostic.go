@@ -9,9 +9,9 @@ import (
 // Severity distinguishes a syntax/structural error, which prevents a rule
 // (or the whole file) from being represented in the domain model, from a
 // semantic warning, which does not. Deeper semantic validation — unknown
-// capabilities, suspicious wildcards, and so on — belongs to policy
-// validation (FSM-12); this package's own diagnostics are limited to what
-// decoding itself needs to report.
+// capabilities, suspicious wildcards, and so on — is Validate's job (see
+// validate.go), not decodeFile's; Parse's own diagnostics are limited to
+// what decoding itself needs to report.
 type Severity int
 
 const (
@@ -28,11 +28,12 @@ func (s Severity) String() string {
 	}
 }
 
-// Diagnostic is one parse or decode finding, carrying the filename and
-// source position the build brief requires ("Report parse diagnostics
-// with filenames and source positions"). It intentionally does not expose
-// hcl.Diagnostic itself, so hclpolicy's consumers — eventually the CLI and
-// TUI — are not coupled to the HCL library's own diagnostic type.
+// Diagnostic is one parse, decode, or validation finding, carrying the
+// filename and source position the build brief requires ("Report parse
+// diagnostics with filenames and source positions") when one is known. It
+// intentionally does not expose hcl.Diagnostic itself, so hclpolicy's
+// consumers — the CLI and, later, the TUI — are not coupled to the HCL
+// library's own diagnostic type.
 type Diagnostic struct {
 	Severity Severity
 	Summary  string
@@ -40,15 +41,40 @@ type Diagnostic struct {
 	Filename string
 	Line     int
 	Column   int
+
+	// Path is the OpenBao path pattern this diagnostic concerns, for a
+	// Validate finding tied to one rule. Empty for a decode-time
+	// diagnostic, or a Validate finding about the policy as a whole (e.g.
+	// "no path rules at all") rather than one rule.
+	Path string
+
+	// Remediation is actionable guidance on how to address the finding,
+	// set by Validate's semantic checks. Empty when Summary/Detail already
+	// say everything worth saying, as is typical for decode-time
+	// diagnostics.
+	Remediation string
 }
 
 // String formats the diagnostic as "filename:line:column: severity:
 // summary" — a conventional, tool-friendly, single-line form. Detail, if
-// present, follows on the same line after a colon.
+// present, follows on the same line after a colon. Validate's findings
+// carry no source position (they identify a rule by Path, not by a source
+// range — see validate.go), so Line/Column are omitted from the line
+// entirely rather than printed as a misleading "0:0"; a decode-time
+// diagnostic always has a real position and keeps the full
+// "filename:line:column:" form unchanged.
 func (d Diagnostic) String() string {
-	msg := fmt.Sprintf("%s:%d:%d: %s: %s", d.Filename, d.Line, d.Column, d.Severity, d.Summary)
+	var msg string
+	if d.Line == 0 && d.Column == 0 {
+		msg = fmt.Sprintf("%s: %s: %s", d.Filename, d.Severity, d.Summary)
+	} else {
+		msg = fmt.Sprintf("%s:%d:%d: %s: %s", d.Filename, d.Line, d.Column, d.Severity, d.Summary)
+	}
 	if d.Detail != "" {
 		msg = fmt.Sprintf("%s: %s", msg, d.Detail)
+	}
+	if d.Remediation != "" {
+		msg = fmt.Sprintf("%s (%s)", msg, d.Remediation)
 	}
 	return msg
 }

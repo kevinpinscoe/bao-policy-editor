@@ -28,9 +28,20 @@ To open a local policy:
 ./bin/bpe policy.hcl
 ```
 
-At this stage `bpe` and `bpe <policy.hcl>` print an explicit "not implemented
-yet" message and exit non-zero rather than starting a TUI — see
-[CLI Reference](#cli-reference) below for what each command currently does.
+To validate a policy without starting the TUI:
+
+```bash
+./bin/bpe validate policy.hcl
+```
+
+This prints every diagnostic found — errors and warnings alike, each
+labeled — and exits `0` if there are no errors (warnings alone do not fail
+validation) or `1` if there are. See [Exit Codes](#exit-codes).
+
+At this stage `bpe` and `bpe <policy.hcl>` (opening the interactive editor)
+print an explicit "not implemented yet" message and exit non-zero rather
+than starting a TUI — see [CLI Reference](#cli-reference) below for what
+each command currently does.
 
 ## Requirements
 
@@ -61,15 +72,29 @@ configuration flags (`--address`, `--token`, `--namespace`, `--ca-cert`,
 [Configuration](#configuration).
 
 **Currently implemented:** argument parsing and validation, `--help`/`help`,
-`bpe <command> --help`, and `--version` all behave as documented above and
-exit `0`.
+`bpe <command> --help`, `--version`, and `bpe validate <policy.hcl>` all behave
+as documented above.
+
+`bpe validate` reads and parses the file, then runs semantic checks —
+unknown capabilities, `deny` combined with other capabilities, duplicate
+path blocks, suspicious wildcard placement, broad `sys/*` access, `sudo`
+use, `create` without `update`, `list`/`scan` on a path that does not look
+like a prefix, KV v2 path-shape mistakes (only warned about when another
+rule in the same file gives evidence the mount is KV v2 — `secret/` is
+never assumed to be KV v2 on its own), expired rules, and contradictory
+`required_parameters`/`denied_parameters` constraints (an error only when
+every value a required parameter is allowed is also denied, or the
+parameter is denied or unlisted outright — see
+[OpenBao's parameter-constraint semantics](https://openbao.org/docs/concepts/policies/#parameter-constraints);
+a partial overlap that still leaves a valid value is never reported).
+Every diagnostic is printed with its severity; warnings never fail
+validation. It performs no write and never contacts OpenBao.
 
 **Currently scaffolded — not implemented yet:** the interactive editor
-(`bpe` / `bpe <policy.hcl>`), `validate`, `format`, and `test` parse and
-validate their arguments correctly, then report an explicit "not implemented
-yet" message on standard error and exit `3`. None of them silently succeed,
-write a file, or contact OpenBao. Real behavior lands in FSM-11 through
-FSM-18.
+(`bpe` / `bpe <policy.hcl>`), `format`, and `test` parse and validate their
+arguments correctly, then report an explicit "not implemented yet" message
+on standard error and exit `3`. None of them silently succeed, write a
+file, or contact OpenBao. Real behavior lands in FSM-13 through FSM-18.
 
 ## Configuration
 
@@ -103,9 +128,9 @@ Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back 
 | Code | Meaning | Status |
 | --- | --- | --- |
 | `0` | Successful command, or `--help`/`help`/`--version` output | Active |
-| `1` | Policy validation failure or denied policy test result | Reserved for FSM-11/FSM-17 |
+| `1` | Policy validation failure or denied policy test result | Active for `validate` (FSM-12); reserved for `test`'s denied result (FSM-17) |
 | `2` | Command-line usage or configuration error | Active |
-| `3` | Operational failure, including a command deliberately not implemented yet | Active |
+| `3` | Operational failure, including a command deliberately not implemented yet, or a policy file that could not be read | Active |
 | `4` | Concurrent modification or version conflict | Reserved for FSM-16 |
 | `130` | Interrupted by the user (Ctrl+C or SIGTERM) | Active |
 
@@ -204,7 +229,7 @@ See [`RUNBOOK.md`](RUNBOOK.md) for operational procedures.
 
 Common connection, TLS, terminal-rendering, logging, and recovery procedures belong in [`RUNBOOK.md`](RUNBOOK.md). Operational guidance there is still under development until those features exist.
 
-**Current limitations:** the interactive editor, HCL parsing, policy validation, formatting, capability testing, file persistence, and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
+**Current limitations:** the interactive editor, formatting, capability testing, file persistence, and OpenBao connectivity are not implemented yet — see [CLI Reference](#cli-reference). HCL parsing (FSM-11) and policy validation (FSM-12) are implemented and reachable through `bpe validate`. Every command that isn't implemented says so explicitly and exits `3`; none of them report false success.
 
 ## Security
 

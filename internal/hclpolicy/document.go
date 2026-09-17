@@ -42,6 +42,11 @@ var knownPathAttributes = map[string]bool{
 // is only safe to use for a policy with no unsupported content — see its
 // doc comment.
 type Document struct {
+	// Filename is the name Parse was called with, kept on the Document
+	// itself (not just on each Diagnostic) so Validate can stamp it onto
+	// findings that have no source position of their own to carry it.
+	Filename string
+
 	// Policy is the decoded domain model. When Unsupported is true, it
 	// reflects only the subset of the source this package could decode;
 	// callers must not treat it as the complete policy in that case.
@@ -102,7 +107,7 @@ func (d *Document) Bytes() []byte {
 // is currently none — Parse never returns a non-nil error — but the
 // signature keeps that door open without an API break).
 func Parse(filename string, src []byte) (*Document, error) {
-	doc := &Document{}
+	doc := &Document{Filename: filename}
 
 	rawFile, rawDiags := hclwrite.ParseConfig(src, filename, hcl.InitialPos)
 	doc.Diagnostics = append(doc.Diagnostics, diagnosticsFromHCL(rawDiags)...)

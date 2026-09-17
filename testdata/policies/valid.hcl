@@ -7,8 +7,9 @@ path "secret/data/team-a/*" {
   required_parameters = ["owner"]
 
   allowed_parameters = {
-    "ttl" = ["1h", "24h"]
-    "env" = []
+    "owner" = []
+    "ttl"   = ["1h", "24h"]
+    "env"   = []
   }
 
   denied_parameters = {
