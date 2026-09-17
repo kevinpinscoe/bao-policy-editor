@@ -516,11 +516,20 @@ type Decision struct {
 //     real decision needs the actual request's parameter values, which
 //     Evaluate (and bpe test, which supplies only a path and a
 //     capability) is never given.
-//   - Nothing matched literally, but an identity-template rule elsewhere
-//     is structurally consistent with path — it COULD have matched once
-//     its template resolves to a real value. Kevin's instruction,
-//     2026-09-17: Evaluate must not silently present this as a confident
-//     default deny; see templatedNearMiss.
+//   - Regardless of what the literal lookup decided — a confident allow,
+//     a confident deny, or a clean default deny — a DIFFERENT rule
+//     elsewhere carries an unresolved identity template that is
+//     structurally consistent with path, so it could plausibly match
+//     once resolved. That resolution could introduce a higher-priority
+//     match, merge into the same resolved pattern as the literal winner
+//     and change its effective capabilities or add a deny, or (when
+//     nothing else matched) simply be the only rule that would have
+//     matched at all. Kevin's instruction, 2026-09-17: a definite result
+//     is only kept when independence from the template can be
+//     established; this check runs on every request, not only when
+//     nothing else matched, and conservatively returns INCOMPLETE rather
+//     than trying to prove the template's resolution could not have
+//     changed the outcome. See templatedNearMiss.
 //
 // Decision is still populated with what IS known (winning pattern where
 // there is one, stage) when this error is returned, but Decision.Allowed
@@ -540,6 +549,41 @@ func (e *Evaluator) Evaluate(path string, capability policy.Capability) (Decisio
 	d := Decision{RequestedPath: path, RequestedCapability: capability}
 	isListOrScan := capability == policy.CapabilityList || capability == policy.CapabilityScan
 
+	dec, err := e.lookupLiteral(d, path, isListOrScan)
+
+	// Regardless of what the literal lookup above found — a confident
+	// allow, a confident deny, or a clean default deny — an unresolved
+	// identity-template rule elsewhere that could plausibly match this
+	// exact path might change that result once resolved: it could
+	// introduce a higher-priority match, merge into an identical
+	// resolved pattern and change the effective capabilities or add a
+	// deny, or (the original gap) simply be the only rule that would
+	// have matched at all. Kevin's instruction, 2026-09-17: keep a
+	// definite result only when independence from the template can be
+	// established; conservative INCOMPLETE is preferred over trying to
+	// prove that in every case, so this check runs whenever the literal
+	// lookup did not already decide the result is incomplete for some
+	// other reason (decide's own looksTemplated/parameter-constraint
+	// checks).
+	if !dec.Incomplete {
+		if tmpl := e.templatedNearMiss(path); tmpl != nil {
+			return withTemplateUncertainty(dec, tmpl, path)
+		}
+		if isListOrScan && strings.HasSuffix(path, "/") {
+			if tmpl := e.templatedNearMiss(strings.TrimSuffix(path, "/")); tmpl != nil {
+				return withTemplateUncertainty(dec, tmpl, path)
+			}
+		}
+	}
+
+	return dec, err
+}
+
+// lookupLiteral runs the real 4-stage-plus-default-deny lookup exactly
+// as before this ticket's regression review — a purely literal match,
+// with no awareness of identity templates at all. Evaluate wraps this
+// with the template-uncertainty check above.
+func (e *Evaluator) lookupLiteral(d Decision, path string, isListOrScan bool) (Decision, error) {
 	if rule, ok := e.exact[path]; ok {
 		return decide(d, rule, StageExact)
 	}
@@ -560,37 +604,24 @@ func (e *Evaluator) Evaluate(path string, capability policy.Capability) (Decisio
 		}
 	}
 
-	// Nothing matched literally. Before conceding a true default deny,
-	// check whether an unresolved identity-template rule could plausibly
-	// have mattered for this exact path — see templatedNearMiss's doc
-	// comment. This check is deliberately last: every real stage above
-	// gets a genuine chance to match first, so a templated rule never
-	// pre-empts an actual, confident answer.
-	if tmpl := e.templatedNearMiss(path); tmpl != nil {
-		return incompleteFromTemplateNearMiss(d, tmpl, path)
-	}
-	if isListOrScan && strings.HasSuffix(path, "/") {
-		if tmpl := e.templatedNearMiss(strings.TrimSuffix(path, "/")); tmpl != nil {
-			return incompleteFromTemplateNearMiss(d, tmpl, path)
-		}
-	}
-
 	d.Stage = StageDefaultDeny
 	d.Allowed = false
 	return d, nil
 }
 
-// incompleteFromTemplateNearMiss builds the Decision/error pair for a
-// templatedNearMiss hit — distinct from decide's own looksTemplated
-// check, which fires when a templated rule actually WON the lookup
-// (rather than merely being structurally consistent with a path nothing
-// else matched).
-func incompleteFromTemplateNearMiss(d Decision, tmpl *compiledRule, path string) (Decision, error) {
-	d.Stage = StageDefaultDeny
+// withTemplateUncertainty overrides an otherwise-decided Decision
+// because an unresolved identity-template rule could plausibly change
+// it once resolved. WinningPattern/Stage/Sources/DeniedBy are left as
+// the literal lookup found them — informational context about what
+// matched literally — but Allowed and Denied are reset to false, since
+// either could be exactly what the template resolution changes.
+func withTemplateUncertainty(d Decision, tmpl *compiledRule, path string) (Decision, error) {
 	d.Incomplete = true
+	d.Allowed = false
+	d.Denied = false
 	d.IncompleteReason = fmt.Sprintf(
-		"no rule matched %q literally, but path %q contains an unresolved OpenBao identity template that could plausibly match it once resolved; bpe does not resolve identity templates, so a default-deny answer here would not be trustworthy",
-		path, tmpl.pattern,
+		"path %q contains an unresolved OpenBao identity template that could plausibly match %q once resolved, which could change this result — a higher-priority match, a merge into an identical resolved pattern that changes effective capabilities, or a new deny; bpe does not resolve identity templates, so this cannot be treated as a final answer",
+		tmpl.pattern, path,
 	)
 	return d, fmt.Errorf("%w: %s", ErrIncompleteEvaluation, d.IncompleteReason)
 }

@@ -51,21 +51,29 @@ func classifyPath(raw string) (matchPath string, isPrefix, hasSegmentWildcards b
 
 // templatedNearMiss reports whether some rule containing an unresolved
 // OpenBao identity template could plausibly match path once that
-// template is resolved to a real value — checked only when nothing else
-// has matched literally, right before Evaluate would otherwise concede a
-// true default deny (Kevin's instruction, 2026-09-17: an unresolved
-// identity-template rule that could affect the requested path must
-// return INCOMPLETE, even when its literal template text does not match
-// the request — it must not silently fall through to default deny).
+// template is resolved to a real value. Evaluate calls this on every
+// request, regardless of what the literal lookup already decided
+// (Kevin's instruction, 2026-09-17, generalizing an earlier, narrower
+// version of this check that ran only before a true default deny): a
+// broad literal allow could be shadowed by a more specific templated
+// deny once resolved, a broad literal deny could be shadowed by a more
+// specific templated allow, and a template that could resolve to the
+// exact same pattern as a literal rule could change that rule's merged
+// capabilities or introduce a deny — none of which a purely literal
+// lookup can rule out.
 //
 // This is deliberately conservative rather than exhaustive: a templated
 // segment is treated as matching anything (the same way a "+" segment
-// is), so a rule is flagged whenever it is structurally CONSISTENT with
-// path, not only when BPE can prove it would actually win. That keeps
-// the check scoped to rules that could genuinely have mattered for this
-// specific path — an unrelated templated rule elsewhere in the policy
-// (different literal prefix, different segment count) does not poison
-// every other default-deny result.
+// is, and regardless of whether the template occupies a whole segment or
+// is embedded alongside literal text within one — OpenBao's own
+// templating is not restricted to whole-segment placement, and neither
+// is this check), so a rule is flagged whenever it is structurally
+// CONSISTENT with path, not only when BPE can prove it would actually
+// win or actually merge. That keeps the check scoped to rules that could
+// genuinely have mattered for this specific path — an unrelated
+// templated rule elsewhere in the policy (different literal prefix,
+// different segment count) does not poison an otherwise-independent
+// result.
 func (e *Evaluator) templatedNearMiss(path string) *compiledRule {
 	for _, r := range e.templated {
 		if couldTemplatedRuleMatch(r.pattern, path) {
@@ -103,6 +111,22 @@ func couldTemplatedRuleMatch(pattern, path string) bool {
 		switch {
 		case seg == "+":
 		case strings.Contains(seg, "{{") && strings.Contains(seg, "}}"):
+			// A template may be embedded within a segment alongside
+			// literal text ("user-{{identity.entity.id}}-config"), not
+			// only occupy a whole segment on its own — OpenBao's
+			// templating syntax is not restricted that way, and this
+			// check does not assume it is. Only the literal text before
+			// the first "{{" and after the last "}}" in this segment is
+			// known regardless of what the template resolves to;
+			// require the corresponding path segment to actually carry
+			// that literal prefix and suffix, rather than treating the
+			// whole segment as an unconditional wildcard (which would
+			// make an unrelated path falsely look like a near miss).
+			open := strings.Index(seg, "{{")
+			closeIdx := strings.LastIndex(seg, "}}") + 2
+			if !strings.HasPrefix(pathSegs[i], seg[:open]) || !strings.HasSuffix(pathSegs[i], seg[closeIdx:]) {
+				return false
+			}
 		case isPrefix && i == len(patternSegs)-1:
 			if !strings.HasPrefix(pathSegs[i], seg) {
 				return false

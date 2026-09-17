@@ -526,6 +526,108 @@ func TestEvaluate_IdentityTemplate_NearMiss_SegmentCountMismatch_StaysDefaultDen
 	}
 }
 
+// --- Template uncertainty must also override an already-decided
+// result, not just a default deny (Kevin's follow-up instruction,
+// 2026-09-17): an unresolved template might resolve into a
+// higher-priority rule, merge into an identical winning pattern, or
+// otherwise change a result the literal lookup already reached.
+
+// TestEvaluate_BroadAllowShadowedByPotentialTemplatedDeny: a broad
+// literal allow matches, but a more specific templated deny could
+// plausibly resolve to outrank it — must not confidently ALLOW.
+func TestEvaluate_BroadAllowShadowedByPotentialTemplatedDeny(t *testing.T) {
+	ev := compile(t,
+		named("p.hcl",
+			rule("secret/*", policy.CapabilityRead),
+			rule("secret/data/{{identity.entity.id}}/foo", policy.CapabilityDeny),
+		),
+	)
+
+	d, err := ev.Evaluate("secret/data/bob-the-entity/foo", policy.CapabilityRead)
+	if !errors.Is(err, ErrIncompleteEvaluation) {
+		t.Fatalf("err = %v, want ErrIncompleteEvaluation — the templated deny could plausibly resolve to a more specific, higher-priority match", err)
+	}
+	if d.Allowed {
+		t.Error("got Allowed = true, want false — a literal-only decision must not be trusted here")
+	}
+}
+
+// TestEvaluate_BroadDenyShadowedByPotentialTemplatedAllow: the mirror
+// case — a broad literal deny matches, but a more specific templated
+// allow could plausibly resolve to outrank it — must not confidently
+// DENY either.
+func TestEvaluate_BroadDenyShadowedByPotentialTemplatedAllow(t *testing.T) {
+	ev := compile(t,
+		named("p.hcl",
+			rule("secret/*", policy.CapabilityDeny),
+			rule("secret/data/{{identity.entity.id}}/foo", policy.CapabilityRead),
+		),
+	)
+
+	d, err := ev.Evaluate("secret/data/bob-the-entity/foo", policy.CapabilityRead)
+	if !errors.Is(err, ErrIncompleteEvaluation) {
+		t.Fatalf("err = %v, want ErrIncompleteEvaluation — the templated allow could plausibly resolve to a more specific, higher-priority match", err)
+	}
+	if d.Denied {
+		t.Error("got Denied = true, want false — a literal-only decision must not be trusted here")
+	}
+}
+
+// TestEvaluate_TemplateCouldResolveToSameLiteralPattern_Incomplete: the
+// query path IS exactly what a templated rule would resolve to for a
+// plausible identity value, and a literal rule already exists at that
+// same exact path. In real OpenBao these would merge (capability union
+// or deny-erasure, per mergeRule) once resolved — BPE cannot know
+// whether they are actually the same pattern, so it must not report the
+// literal rule's own result as final.
+func TestEvaluate_TemplateCouldResolveToSameLiteralPattern_Incomplete(t *testing.T) {
+	ev := compile(t,
+		named("p.hcl",
+			rule("secret/data/bob/foo", policy.CapabilityRead),
+			rule("secret/data/{{identity.entity.id}}/foo", policy.CapabilityDeny),
+		),
+	)
+
+	// "bob" is a perfectly plausible identity.entity.id value, so the
+	// templated deny could resolve to exactly this literal rule's own
+	// path and, per mergeRule, erase its read grant.
+	d, err := ev.Evaluate("secret/data/bob/foo", policy.CapabilityRead)
+	if !errors.Is(err, ErrIncompleteEvaluation) {
+		t.Fatalf("err = %v, want ErrIncompleteEvaluation — the template could resolve to this exact literal pattern and change its merged capabilities", err)
+	}
+	if d.Allowed {
+		t.Error("got Allowed = true, want false")
+	}
+}
+
+// TestEvaluate_TemplateEmbeddedWithinSegment_StillDetected proves the
+// near-miss approximation does not assume a template always occupies an
+// entire path segment on its own — OpenBao's templating syntax is not
+// restricted that way, and neither is this check. The template here is
+// embedded alongside literal text within one segment.
+func TestEvaluate_TemplateEmbeddedWithinSegment_StillDetected(t *testing.T) {
+	ev := compile(t, named("p.hcl", rule("secret/data/user-{{identity.entity.id}}-config", policy.CapabilityRead)))
+
+	d, err := ev.Evaluate("secret/data/user-bob-config", policy.CapabilityRead)
+	if !errors.Is(err, ErrIncompleteEvaluation) {
+		t.Fatalf("err = %v, want ErrIncompleteEvaluation — the template is embedded within the segment, not the whole segment, but must still be detected", err)
+	}
+	if d.Allowed {
+		t.Error("got Allowed = true, want false")
+	}
+
+	// A path whose corresponding segment shares no literal overlap with
+	// "user-" / "-config" at all could not plausibly come from this
+	// template, and must stay a genuine default deny.
+	d2, err2 := ev.Evaluate("secret/data/completely-unrelated", policy.CapabilityRead)
+	if err2 != nil {
+		t.Fatalf("Evaluate() error = %v, want nil", err2)
+	}
+	if d2.Allowed || d2.Incomplete {
+		t.Errorf("got %+v, want a genuine default deny", d2)
+	}
+}
+
 // --- Go-API input validation (Kevin's point 5, 2026-09-17: validated
 // independently of the CLI).
 
