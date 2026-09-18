@@ -24,6 +24,26 @@ func TestParseArgs_Success(t *testing.T) {
 			want: Command{Kind: KindDefault, PolicyFile: "policy.hcl"},
 		},
 		{
+			name: "--remote alone",
+			args: []string{"--remote"},
+			want: Command{Kind: KindDefault, Remote: true},
+		},
+		{
+			name: "--remote with configuration flags",
+			args: []string{"--remote", "--address", "https://bao.test:8200"},
+			want: Command{Kind: KindDefault, Remote: true},
+		},
+		{
+			name: "--remote=false is not remote",
+			args: []string{"--remote=false"},
+			want: Command{Kind: KindDefault},
+		},
+		{
+			name: "--remote does not block --help",
+			args: []string{"--remote", "--help"},
+			want: Command{Kind: KindHelp, Remote: true},
+		},
+		{
 			name: "validate subcommand",
 			args: []string{"validate", "policy.hcl"},
 			want: Command{Kind: KindValidate, PolicyFile: "policy.hcl"},
@@ -131,6 +151,9 @@ func TestParseArgs_Success(t *testing.T) {
 			if got.HelpTopic != tc.want.HelpTopic {
 				t.Errorf("HelpTopic = %q, want %q", got.HelpTopic, tc.want.HelpTopic)
 			}
+			if got.Remote != tc.want.Remote {
+				t.Errorf("Remote = %v, want %v", got.Remote, tc.want.Remote)
+			}
 			if got.FormatCheck != tc.want.FormatCheck {
 				t.Errorf("FormatCheck = %v, want %v", got.FormatCheck, tc.want.FormatCheck)
 			}
@@ -174,6 +197,15 @@ func TestParseArgs_Errors(t *testing.T) {
 		{name: "unexpected argument after --version", args: []string{"--version", "extra"}},
 		{name: "unknown help topic", args: []string{"help", "frobnicate"}},
 		{name: "flag missing its value", args: []string{"--address"}},
+		// --remote takes no positional argument. A policy name and a
+		// filename are the same token to a parser, so rather than guessing
+		// from an extension, both are refused and a policy is chosen in the
+		// browser instead.
+		{name: "--remote with a filename", args: []string{"--remote", "policy.hcl"}},
+		{name: "--remote with a bare name", args: []string{"--remote", "team-a"}},
+		{name: "--remote before validate", args: []string{"--remote", "validate", "policy.hcl"}},
+		{name: "--remote after format", args: []string{"format", "policy.hcl", "--remote"}},
+		{name: "--remote with test", args: []string{"test", "policy.hcl", "--path", "x", "--capability", "read", "--remote"}},
 	}
 
 	for _, tc := range cases {
