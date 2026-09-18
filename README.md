@@ -10,7 +10,7 @@ Experimental
 
 ## Purpose
 
-BPE helps OpenBao administrators and platform engineers understand policy behavior before granting access. It provides a guided alternative to manually editing HCL, with particular attention to path precedence, wildcards, capabilities, explicit denies, and KV v2 paths. It can work with local policy files without an OpenBao server and will optionally read and update policies through the OpenBao API. Nothing currently depends on it.
+BPE helps OpenBao administrators and platform engineers understand policy behavior before granting access. It provides a guided alternative to manually editing HCL, with particular attention to path precedence, wildcards, capabilities, explicit denies, and KV v2 paths. It works with local policy files without an OpenBao server, and optionally reads and updates policies through the OpenBao API. Nothing currently depends on it.
 
 ## Quick Start
 
@@ -63,9 +63,22 @@ Or check whether it needs formatting, without writing it — suitable for CI:
 
 See [File writes](#file-writes) for what "in place" guarantees and does not.
 
+To edit the policies on an OpenBao server instead of a local file:
+
+```bash
+export BAO_ADDR=https://openbao.example.com:8200
+export BAO_TOKEN=...          # never typed into BPE's interface
+./bin/bpe --remote
+```
+
+This opens the same editor on the server's policies. It takes no file
+argument — a policy is chosen by name in the browser. See
+[Remote policies](#remote-policies).
+
 `bpe` with no subcommand opens the [interactive editor](#interactive-editor):
 with a file, on that policy; without one, on an empty policy. Opening a
-file does not modify it.
+file does not modify it. Neither form builds an OpenBao client or opens a
+connection, whatever `BAO_ADDR` and `BAO_TOKEN` are set to.
 
 ## Requirements
 
@@ -82,6 +95,7 @@ file does not modify it.
 ```text
 bpe                                                              Start the interactive editor with an empty policy
 bpe <policy.hcl>                                                 Start the interactive editor, opening a policy file
+bpe --remote                                                     Start the interactive editor on an OpenBao server's policies
 bpe validate <policy.hcl>                                        Validate a policy without starting the interactive editor
 bpe format <policy.hcl> [--check]                                Format a policy file, or check whether it is formatted
 bpe test <policy.hcl> --path <path> --capability <capability>    Simulate an effective-access check
@@ -96,13 +110,18 @@ may `format`'s `--check`. Global configuration flags (`--address`, `--token`,
 `--tls-server-name`, `--skip-verify`) are accepted anywhere on the command
 line — see [Configuration](#configuration).
 
-**Currently implemented:** every command above. Argument parsing and
-validation, `--help`/`help`, `bpe <command> --help`, `--version`,
-`bpe validate <policy.hcl>`, `bpe format <policy.hcl> [--check]`,
-`bpe test <policy.hcl> --path <path> --capability <capability>`, and the
-interactive editor (`bpe` / `bpe <policy.hcl>`) all behave as documented
-below. OpenBao connectivity is not implemented — no command in this
-release contacts a server.
+**`--remote` takes no positional argument.** `bpe --remote policy.hcl` and
+`bpe --remote team-a` are both usage errors (exit `2`): a policy name and a
+filename are the same token to a parser, so allowing one while rejecting
+the other would mean guessing from a file extension. A policy is chosen by
+name in the browser instead. `--remote` is also rejected alongside
+`validate`, `format`, and `test`, which are local-file operations that
+contact no server.
+
+**Currently implemented:** every command above, including remote policy
+editing (see [Remote policies](#remote-policies)). Only the interactive
+editor's remote mode contacts a server; `validate`, `format`, `test`,
+`bpe`, and `bpe <policy.hcl>` never do.
 
 `bpe validate` reads and parses the file, then runs semantic checks —
 unknown capabilities, `deny` combined with other capabilities, duplicate
@@ -159,7 +178,15 @@ and what it refuses to do.
 
 `bpe` opens an empty policy; `bpe <policy.hcl>` opens that file. Opening a
 file is a read — nothing is written and the file's modification time is
-untouched.
+untouched. `bpe --remote`, and the `r` key, open the same editor on an
+OpenBao server's policies instead — see
+[Remote policies](#remote-policies).
+
+**The header says where the document lives**, in words rather than a
+colour: `local file`, `remote · <address>`, `new remote policy on
+<address>`, or `unsaved`. It is the first thing on the line, ahead of
+`modified`/`saved`, because "modified" means two different things
+depending on the answer.
 
 **It edits the file you opened rather than regenerating it.** Every change
 is applied to the parsed HCL token stream, so a comment, an attribute BPE
@@ -190,6 +217,7 @@ BPE will not rewrite a file it could not fully read.
 | `g` | Validation diagnostics, with severity and source line |
 | `t` | Effective-access test, run against the policy including unsaved edits |
 | `s` | Save review — a diff of what is about to be written against what was read |
+| `r` | Connect to an OpenBao server and browse its policies (see [Remote policies](#remote-policies)) |
 | `?` | Full key reference |
 
 Every screen lists the keys it accepts in a footer. On a narrow terminal
@@ -210,8 +238,20 @@ key stays visible.
 | `d` | Duplicate the selected rule, comments and all |
 | `x` | Remove the selected rule |
 | `ctrl+d` | Unset a field in the rule form — removes the attribute rather than emptying it |
-| `ctrl+s` | Apply the form, or write the file from the review screen |
+| `ctrl+s` | Apply the form, or write the file — or the policy — from the review screen |
+| `r` | Open the remote policy browser |
 | `q` / `ctrl+c` | Quit, with confirmation when there are unsaved changes |
+
+In the remote browser:
+
+| Key | Does |
+| --- | --- |
+| `↑` / `↓`, `enter` | Select and open a policy |
+| `n` | Start a new policy on the server |
+| `x` | Delete a policy — asks for its name typed out |
+| `/` | Filter the listing; `esc` leaves the filter |
+| `r` | Refresh the listing |
+| `esc` | Cancel a request in flight, or go back |
 
 Mouse: click a rule to select it, and use the wheel to scroll a long view.
 Everything the mouse does has a key that does the same thing — mouse input
@@ -271,8 +311,9 @@ this policy from something unrelated.
 
 `bpe format` and the interactive editor's save are the two things that
 write to a local file, and both go through the same `internal/fileio`
-package; any future local side of a remote edit (FSM-16) will reuse it too
-rather than duplicating this logic.
+package. A remote save does not come here at all: conflict safety on the
+server is OpenBao's own check-and-set, and the two mechanisms are
+deliberately separate — see [Remote policies](#remote-policies).
 
 - **Atomic.** A write goes to a temporary file in the same directory,
   is `fsync`ed, has its permissions set, and is renamed over the
@@ -369,14 +410,54 @@ identically to an explicitly empty flag value.
 | `BAO_TLS_SERVER_NAME` | `--tls-server-name` | Optional TLS server name |
 | `BAO_SKIP_VERIFY` | `--skip-verify` | Disable TLS certificate verification (default `false`) |
 
-Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back to their corresponding `VAULT_*` variables. Configuration resolution never reads a persistent BPE configuration file and never contacts OpenBao — no command in this release performs network access.
+Following OpenBao CLI convention, `BAO_*` variables are preferred and fall back to their corresponding `VAULT_*` variables. Configuration resolution never reads a persistent BPE configuration file and never contacts OpenBao: resolving these values is pure string handling, and only the interactive editor's [remote mode](#remote-policies) ever uses the result to open a connection.
+
+The address and namespace can also be changed on the connect screen, which starts from the values resolved above. The token cannot — see [Security behavior](#security-behavior).
 
 ## Remote policies
 
 BPE can read and write policies on an OpenBao server as well as local
-files. The client lives in `internal/baoclient`; **no command in this
-release uses it yet** — wiring it into the editor is FSM-17 — so nothing
-BPE currently does contacts a server.
+files. The client lives in `internal/baoclient`; the editor reaches it
+through `bpe --remote` or the `r` key.
+
+**Remote mode is the only thing in BPE that touches a network.** The
+client is constructed when remote mode is entered and nowhere else, so
+`bpe`, `bpe <policy.hcl>`, `validate`, `format`, and `test` build no
+client and open no connection — with `BAO_ADDR` and `BAO_TOKEN` fully
+populated, or not set at all. A test in `internal/tui` asserts this by
+failing if a local session so much as calls the client constructor.
+
+### The workflow
+
+`bpe --remote` connects and lists the policies your token can see. Pick
+one with `enter` to edit it exactly as you would a local file — the same
+rule list, capability form, HCL preview, diagnostics, and effective-access
+test, because a remote policy is a different source for the same document,
+not a different editor.
+
+`s` reviews the pending change as a diff and `ctrl+s` sends it. `n` starts
+a new policy; `x` deletes one. `esc` cancels a request that is still in
+flight, and nothing a cancelled request would have done is applied
+afterwards.
+
+**Your document is never disturbed by a failure.** A connection that fails,
+a token that is rejected, a certificate that does not verify, a write the
+server refuses, and a request you cancel all leave the document and every
+unsaved edit exactly as they were.
+
+### What a remote write asks of you first
+
+| Operation | Gate |
+| --- | --- |
+| Create or update | The review screen: a diff of what will be sent, confirmed with `ctrl+s`. Nothing is sent before that. |
+| Update whose version is stale | Refused by the server, then the conflict flow below. Never an overwrite. |
+| Create whose name is taken | Refused and kept as a create conflict. BPE will not convert it into an update. |
+| Delete | The policy's exact name, typed out. |
+| Discarding your edits for the server's copy | A second confirmation, separate from the conflict question. |
+
+**Unattended remote writes are deliberately absent.** There is no
+non-interactive form of any of the above, and no flag to skip a
+confirmation.
 
 ### What it needs from a token
 
@@ -418,8 +499,32 @@ the write, so it would report an update as conflict-safe when it was not.
 
 **Deletion has no equivalent.** This endpoint offers no check-and-set for
 DELETE, so a delete cannot be made atomic against a concurrent change. BPE
-says so rather than implying a safety it cannot provide, and the
-confirmation for a delete belongs in the interface that asks for it.
+says so rather than implying a safety it cannot provide: the delete
+confirmation states it outright, and asks for the policy's exact name
+rather than a single keystroke.
+
+#### What happens when a write is refused
+
+A rejected check-and-set is never resolved for you, and never becomes an
+overwrite:
+
+1. The write is refused. Your edits are untouched, and the document still
+   reports itself as modified.
+2. You are told the policy changed, and offered three answers.
+3. **See what is on the server** re-reads it and shows it as a diff
+   against your version. This changes nothing; it only moves the revision
+   a later write would send.
+4. From that diff — and only from there, having seen it — `ctrl+s` retries
+   with the revision the re-read reported, replacing the server's version
+   with yours. The footer on that screen says so in those words.
+5. **Take the server's version** instead asks a second time before
+   discarding your edits, because they exist nowhere else.
+6. **Cancel** leaves everything as it is and writes nothing.
+
+A create refused because the name is taken is a different question, and
+gets a different answer: BPE offers to *open* the existing policy. That is
+a read, which produces a real revision, so any write after it is a genuine
+conflict-checked update. The refused create is never retried as one.
 
 One detail is undocumented upstream: OpenBao's API reference states
 neither the HTTP status code nor the error body for a failed
@@ -435,10 +540,18 @@ misreported as a bad request invites someone to force the write.
   error, no log line, and nothing written to disk. Errors leaving the
   client are additionally scrubbed of it, so a server that echoes the
   token back inside its own error message cannot leak it through BPE.
+- **The token is never entered in the interface.** It comes from the
+  resolved configuration (`--token`, `BAO_TOKEN`, `VAULT_TOKEN`) and the
+  connect screen reports only whether one is `configured` or
+  `not configured`. There is no field to type a token into, so there is no
+  path by which one reaches a terminal's scrollback, a screen capture, or
+  a multiplexer's buffer.
 - Certificate verification is **on** unless `--skip-verify` /
   `BAO_SKIP_VERIFY` explicitly turns it off, and doing so produces a
   warning that says what it exposes rather than noting that verification
-  is off.
+  is off. That warning then stays on screen for as long as the connection
+  lasts — on every screen, including modal questions — as text rather than
+  a colour, so it cannot be scrolled past and survives `NO_COLOR`.
 - BPE reads no secret values and never persists a token.
 - `BAO_MAX_RETRIES` has no effect. BPE resolves its own configuration and
   disables the OpenBao client's separate environment reading, so that the
@@ -451,10 +564,10 @@ misreported as a bad request invites someone to force the write.
 | Code | Meaning | Status |
 | --- | --- | --- |
 | `0` | Successful command, or `--help`/`help`/`--version` output | Active |
-| `1` | `validate`: a validation failure. `test`: a denied result, or a policy it cannot trust enough to simulate against (unsupported content or decode errors). `format`: a genuine HCL syntax error, or — with `--check` only — the file would be reformatted. | Active for `validate` (FSM-12), `test` (FSM-13), and `format` (FSM-14) — corrected from an earlier, mistaken "reserved for FSM-17" note; FSM-17 is TUI/remote integration, unrelated to this exit code |
+| `1` | `validate`: a validation failure. `test`: a denied result, or a policy it cannot trust enough to simulate against (unsupported content or decode errors). `format`: a genuine HCL syntax error, or — with `--check` only — the file would be reformatted. | Active for `validate`, `test`, and `format` |
 | `2` | Command-line usage or configuration error | Active |
 | `3` | Operational failure: a policy file that could not be read, a `test` result `bpe` cannot reduce to a trustworthy decision from path and capability alone (see [Evaluation limits](#evaluation-limits)), `format` refusing to write through a symlink or a detected hard-linked file, or the interactive editor failing to start | Active |
-| `4` | A detected write conflict: the local file changed on disk between being read and being written (see [File writes](#file-writes)), or a remote check-and-set write was rejected because the policy changed on the server (see [Remote policies](#remote-policies)). The interactive editor reports the local case on screen and keeps your edits rather than exiting | Active |
+| `4` | A detected write conflict: the local file changed on disk between being read and being written (see [File writes](#file-writes)), or a remote check-and-set write was rejected because the policy changed on the server (see [Remote policies](#remote-policies)). The interactive editor reports both cases on screen and keeps your edits rather than exiting | Active |
 | `130` | Interrupted by the user (Ctrl+C or SIGTERM) | Active |
 
 ## Common Commands
@@ -500,7 +613,7 @@ bao-policy-editor/
 ├── cmd/
 │   └── bpe/                 # main.go, CLI parsing, command dispatch — application entry point
 ├── internal/
-│   ├── tui/                 # Bubble Tea v2 interactive editor — screens, forms, styles
+│   ├── tui/                 # Bubble Tea v2 interactive editor — screens, forms, styles, remote workflows
 │   ├── policy/               # UI-independent policy domain model
 │   ├── hclpolicy/            # HCL parsing, validation, generation, and surgical editing
 │   ├── evaluator/             # Matching and effective-access simulation
@@ -522,7 +635,7 @@ bao-policy-editor/
 
 ## How It Works
 
-The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL — and edits HCL in place, applying one attribute, label, or block change to the parsed token stream so that everything it was not asked to change survives byte for byte; the TUI is an editable projection of that document rather than a second copy of it. `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API, using the endpoint's native check-and-set so an update cannot silently overwrite someone else's change; it deliberately depends on nothing terminal-related, so the editor is built against its interface rather than the other way round. `fileio` reads a local file together with a snapshot of its on-disk state and later replaces it only if that state has not changed — the shared local-persistence primitive `bpe format` uses today and the TUI's save and `baoclient`'s local side will reuse later; it is local-filesystem only; remote OpenBao CAS handling stays `baoclient`'s concern. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), help text (`help.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
+The TUI collects user actions and renders policy rules but does not implement policy semantics itself. The `policy` package holds the UI-independent domain model. `hclpolicy` translates between that model and HCL — and edits HCL in place, applying one attribute, label, or block change to the parsed token stream so that everything it was not asked to change survives byte for byte; the TUI is an editable projection of that document rather than a second copy of it. `evaluator` determines effective access using OpenBao path-matching and capability rules. `baoclient` lists, retrieves, and updates remote policies through the OpenBao API, using the endpoint's native check-and-set so an update cannot silently overwrite someone else's change; it deliberately depends on nothing terminal-related, so the editor is built against its interface rather than the other way round. `fileio` reads a local file together with a snapshot of its on-disk state and later replaces it only if that state has not changed — the shared local-persistence primitive behind both `bpe format` and the editor's save; it is local-filesystem only, and remote OpenBao CAS handling stays `baoclient`'s concern. The editor's session holds exactly one backing — new, local, or remote — so which of those two conflict mechanisms applies is never ambiguous, and the screens above them are the same either way. `config` resolves command-line and environment configuration. `apperr` defines the structured application error and exit-code contract shared by the CLI and the TUI. `cmd/bpe` itself is split into argument parsing (`cli.go`), configuration-independent command dispatch (`dispatch.go`), help text (`help.go`), and a thin `main.go` that wires a signal-derived context and is the only place that calls `os.Exit`. This separation allows the parser, evaluator, client, and CLI dispatch to be tested without running the terminal interface or invoking a subprocess.
 
 ```text
 Local HCL file ─┐
@@ -562,7 +675,7 @@ See [`RUNBOOK.md`](RUNBOOK.md) for operational procedures.
 
 Common connection, TLS, terminal-rendering, logging, and recovery procedures belong in [`RUNBOOK.md`](RUNBOOK.md). Operational guidance there is still under development until those features exist.
 
-**Current limitations:** no command in this release contacts a server. The OpenBao client exists and is tested (FSM-16, `internal/baoclient` — see [Remote policies](#remote-policies)), but nothing calls it yet; joining it to the editor is FSM-17, and until then the `BAO_*`/`VAULT_*` configuration is resolved and unused. HCL parsing (FSM-11), policy validation (FSM-12, `bpe validate`), effective-access simulation (FSM-13, `bpe test`), safe local-file formatting and persistence (FSM-14, `bpe format`, `internal/fileio`), and the interactive editor (FSM-15) are implemented — `bpe test` with the scope limits in [Evaluation limits](#evaluation-limits), and local writes with the guarantees and caveats in [File writes](#file-writes).
+**Current limitations:** remote support covers ACL policies and nothing else — there is no namespace browser, no token or auth-method management, and no way to save a local file to the server or a remote policy back to disk in one step beyond the ordinary save-as. Remote writes are interactive only, by design: there is no non-interactive form and no flag that skips a confirmation. HCL parsing, policy validation (`bpe validate`), effective-access simulation (`bpe test`), safe local-file formatting and persistence (`bpe format`, `internal/fileio`), the interactive editor, and remote policy editing (`bpe --remote`, `internal/baoclient`) are all implemented — `bpe test` with the scope limits in [Evaluation limits](#evaluation-limits), local writes with the guarantees and caveats in [File writes](#file-writes), and remote writes with the conflict model in [Remote policies](#remote-policies).
 
 Three limits of the editor worth knowing before you meet them:
 
