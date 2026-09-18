@@ -95,9 +95,36 @@ var (
 		{Key: "p", Label: "preview", Short: "hcl"},
 		{Key: "g", Label: "diagnostics", Short: "diag"},
 		{Key: "t", Label: "test access", Short: "test"},
+		{Key: "r", Label: "remote policies", Short: "remote"},
 		{Key: "s", Label: "save"},
 		{Key: "?", Label: "help"},
 		{Key: "q", Label: "quit"},
+	}
+
+	connectHints = []hint{
+		{Key: "tab/↑/↓", Label: "move between fields", Short: "move"},
+		{Key: "enter", Label: "connect"},
+		{Key: "esc", Label: "back to the editor", Short: "back"},
+	}
+
+	browseHints = []hint{
+		{Key: "↑/↓", Label: "select policy", Short: "move"},
+		{Key: "enter", Label: "open"},
+		{Key: "n", Label: "new policy", Short: "new"},
+		{Key: "x", Label: "delete", Short: "del"},
+		{Key: "/", Label: "filter"},
+		{Key: "r", Label: "refresh"},
+		{Key: "esc", Label: "back"},
+	}
+
+	// serverConflictReviewHints spells out what writing does here, because
+	// it is not the same thing ctrl+s does on the ordinary review screen:
+	// there it saves the work, here it replaces a newer version on the
+	// server with it.
+	serverConflictReviewHints = []hint{
+		{Key: "↑/↓", Label: "scroll"},
+		{Key: "ctrl+s", Label: "replace the server's version with yours", Short: "overwrite"},
+		{Key: "esc", Label: "back, keeping your edits", Short: "back"},
 	}
 
 	formHints = []hint{
@@ -170,8 +197,16 @@ var helpSections = []struct {
 	}},
 	{"Saving and leaving", []hint{
 		{Key: "s", Label: "review the pending changes, then save"},
-		{Key: "ctrl+s", Label: "write the file from the review screen"},
+		{Key: "ctrl+s", Label: "write the file, or the policy, from the review screen"},
 		{Key: "q / ctrl+c", Label: "quit, with confirmation when there are unsaved changes"},
 		{Key: "?", Label: "show this help"},
+	}},
+	{"Policies on an OpenBao server", []hint{
+		{Key: "r", Label: "connect to a server and browse its policies (bpe --remote starts here)"},
+		{Key: "enter", Label: "open the selected policy for editing"},
+		{Key: "n", Label: "start a new policy on the server"},
+		{Key: "x", Label: "delete a policy — asks for its name typed out, and cannot be undone"},
+		{Key: "/", Label: "filter the policy list; esc leaves the filter"},
+		{Key: "esc", Label: "cancel a request in flight, or go back"},
 	}},
 }

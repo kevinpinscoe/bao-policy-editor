@@ -17,7 +17,13 @@ import (
 // depends on the user remembering a keystroke.
 func (m *Model) render() string {
 	if m.dialog != dialogNone {
-		return m.renderDialog()
+		// A dialog still goes through the frame, so a live security
+		// warning stays on screen while the question is being answered.
+		// Delete in particular is a question that ought to be read next to
+		// "certificate verification is disabled".
+		body, choices := m.renderDialog()
+		return m.frame(body, m.renderBanner(), m.renderStatus(),
+			renderHints(m.styles, choices, m.width))
 	}
 
 	var content string
@@ -62,13 +68,65 @@ func (m *Model) render() string {
 
 	case screenReview:
 		content = m.renderScrollScreen(m.reviewTitle())
-		hints = reviewHints
-		if m.reviewingConflict {
+		switch m.reviewKind {
+		case reviewSave:
+			hints = reviewHints
+		case reviewServerConflict:
+			hints = serverConflictReviewHints
+		default:
 			hints = []hint{{Key: "esc", Label: "back"}, {Key: "↑/↓", Label: "scroll"}}
 		}
+
+	case screenConnect:
+		content = m.connect.View(m.styles, m.width)
+		hints = connectHints
+
+	case screenBrowse:
+		content = m.browse.View(m.styles, m.storeAddress(), m.height, m.width)
+		hints = browseHints
+		if m.browse.filtering {
+			hints = []hint{{Key: "esc/enter", Label: "leave the filter", Short: "done"}}
+		}
+
+	case screenRemoteName:
+		content = m.renderRemoteName()
+		hints = []hint{{Key: "enter", Label: "start editing it"}, {Key: "esc", Label: "back"}}
 	}
 
-	return m.frame(content, m.renderStatus(), renderHints(m.styles, hints, m.width))
+	// While a remote request is in flight the footer offers the one key
+	// that does anything, so a slow server never leaves the user reading a
+	// list of actions that are all being ignored.
+	if m.busy {
+		hints = []hint{{Key: "esc", Label: "cancel"}}
+	}
+
+	return m.frame(content, m.renderBanner(), m.renderStatus(), renderHints(m.styles, hints, m.width))
+}
+
+func (m *Model) storeAddress() string {
+	if m.store == nil {
+		return "(not connected)"
+	}
+	return m.store.Address()
+}
+
+// renderBanner is the row above the status line that carries anything
+// which must stay visible regardless of which screen is showing: an
+// in-flight request, and the security warnings for the current connection.
+//
+// The warnings live here rather than on the connect screen alone because
+// disabled certificate verification is not a fact about one screen — it is
+// a fact about every byte sent for as long as the connection lasts, and a
+// warning that can be left behind by pressing a key is a warning that will
+// be. It is text, not a colour, so it survives NO_COLOR intact.
+func (m *Model) renderBanner() string {
+	if m.busy {
+		return m.styles.Subtitle.Render(truncate("… "+m.busyLabel+" — esc to cancel", m.width))
+	}
+	if len(m.warnings) == 0 {
+		return ""
+	}
+	return m.styles.Error.Render(truncate("! "+strings.Join(m.warnings, " | "), m.width))
 }
 
 // frame lays the window out with the status line and the footer pinned to
@@ -81,10 +139,15 @@ func (m *Model) render() string {
 // Content taller than the window is truncated from the bottom rather than
 // allowed to push the footer off the screen — every screen that can hold
 // more than a window's worth scrolls in a viewport instead.
-func (m *Model) frame(content, status, footer string) string {
+func (m *Model) frame(content, banner, status, footer string) string {
 	lines := strings.Split(content, "\n")
 
-	available := max(1, m.height-2)
+	rows := 2
+	if banner != "" {
+		rows = 3
+	}
+
+	available := max(1, m.height-rows)
 	if len(lines) > available {
 		lines = lines[:available]
 	}
@@ -92,6 +155,9 @@ func (m *Model) frame(content, status, footer string) string {
 		lines = append(lines, "")
 	}
 
+	if banner != "" {
+		lines = append(lines, banner)
+	}
 	lines = append(lines, status, footer)
 	return strings.Join(lines, "\n")
 }
@@ -135,15 +201,34 @@ func (m *Model) diagnosticsTitle() string {
 
 func (m *Model) reviewTitle() string {
 	added, removed := CountChanges(m.review)
-	if m.reviewingConflict {
+
+	switch m.reviewKind {
+	case reviewDiskConflict:
 		return fmt.Sprintf("What changed on disk — %d added, %d removed, against your version",
 			added, removed)
+
+	case reviewServerConflict:
+		// This title has to carry what writing from here would mean,
+		// because that is the one thing the diff itself cannot say.
+		return fmt.Sprintf("What is on the server now — %d added, %d removed, against your version; ctrl+s replaces it with yours",
+			added, removed)
+
+	default:
+		// The base name, not the full path: the header already shows where the
+		// file is, and a long path pushes the counts — the part this title
+		// exists for — off the end of the line.
+		return fmt.Sprintf("Review before saving %s — %d added, %d removed",
+			m.reviewTarget(), added, removed)
 	}
-	// The base name, not the full path: the header already shows where the
-	// file is, and a long path pushes the counts — the part this title
-	// exists for — off the end of the line.
-	return fmt.Sprintf("Review before saving %s — %d added, %d removed",
-		filepath.Base(m.session.Filename()), added, removed)
+}
+
+// reviewTarget names what the pending save would write to: a policy name
+// for a remote document, a file's base name for a local one.
+func (m *Model) reviewTarget() string {
+	if name, ok := m.session.RemoteName(); ok {
+		return name + " on " + m.storeAddress()
+	}
+	return filepath.Base(m.session.Filename())
 }
 
 // renderStatus shows the last thing that happened, or the last thing that
@@ -251,10 +336,10 @@ func (m *Model) renderSavePath() string {
 	return b.String()
 }
 
-// renderDialog draws a modal question. Each one names what is at stake in
-// a sentence before offering the keys, because all three are about losing
-// something.
-func (m *Model) renderDialog() string {
+// renderDialog draws a modal question, returning its body and the choices
+// for the footer. Each one names what is at stake in a sentence before
+// offering the keys, because every one of them is about losing something.
+func (m *Model) renderDialog() (string, []hint) {
 	var title string
 	var body []string
 	var choices []hint
@@ -301,6 +386,65 @@ func (m *Model) renderDialog() string {
 			{Key: "r", Label: "reload from disk (discards your edits)"},
 			{Key: "esc", Label: "cancel and keep editing"},
 		}
+
+	case dialogRemoteConflict:
+		name, _ := m.session.RemoteName()
+		title = "The policy changed on the server"
+		body = []string{
+			fmt.Sprintf("%s is not at the version BPE read, so the server refused the write rather than "+
+				"overwriting someone else's change.", name),
+			"Your edits are still here and have not been touched.",
+			"Looking at the server's version does not change your document; it only lets you decide.",
+		}
+		choices = []hint{
+			{Key: "v", Label: "see what is on the server now"},
+			{Key: "r", Label: "take the server's version (discards your edits)"},
+			{Key: "esc", Label: "cancel and keep editing"},
+		}
+
+	case dialogRemoteDiscard:
+		name, _ := m.session.RemoteName()
+		added, removed := CountChanges(Diff(m.session.Original(), m.session.Current()))
+		title = "Discard your edits and take the server's version?"
+		body = []string{
+			fmt.Sprintf("%d %s added and %d removed would be thrown away, and %s as it is on the server "+
+				"would replace them.", added, pluralize("line", added), removed, name),
+			"This cannot be undone — the edits exist nowhere else.",
+		}
+		choices = []hint{
+			{Key: "y", Label: "discard my edits"},
+			{Key: "esc", Label: "no, go back"},
+		}
+
+	case dialogRemoteNameTaken:
+		title = "That policy already exists"
+		body = []string{
+			fmt.Sprintf("The server refused to create %s because a policy of that name is already there. "+
+				"It was not overwritten.", m.takenName),
+			"BPE will not turn a refused create into an update: it has never read that policy, so it holds " +
+				"no version to check the write against and could not tell what it was replacing.",
+			"Open it to see what is actually on the server, or go back and choose another name.",
+		}
+		choices = []hint{
+			{Key: "o", Label: "open the existing policy"},
+			{Key: "esc", Label: "back"},
+		}
+
+	case dialogRemoteDelete:
+		title = "Delete " + m.deleteTarget + " from the server?"
+		body = []string{
+			"This removes the policy from " + m.storeAddress() + " immediately. Nothing is staged, and " +
+				"there is no undo.",
+			"This endpoint has no check-and-set, so unlike an update there is no version to check: if " +
+				"someone changed this policy a moment ago, it is deleted just the same.",
+			"Type the policy name exactly to confirm.",
+			"",
+			"  " + m.styles.Label.Render(pad("name", 8)) + m.deleteConfirm.View(),
+		}
+		choices = []hint{
+			{Key: "enter", Label: "delete it"},
+			{Key: "esc", Label: "keep it"},
+		}
 	}
 
 	var b strings.Builder
@@ -310,7 +454,21 @@ func (m *Model) renderDialog() string {
 		b.WriteString(wrapTo(line, max(20, m.width-2)))
 		b.WriteString("\n")
 	}
+	return b.String(), choices
+}
+
+// renderRemoteName is the screen that names a policy about to be created
+// on the server.
+func (m *Model) renderRemoteName() string {
+	var b strings.Builder
+	b.WriteString(m.styles.Title.Render(truncate("New policy on "+m.storeAddress(), m.width)))
 	b.WriteString("\n")
-	b.WriteString(renderHints(m.styles, choices, m.width))
+	b.WriteString(m.styles.Dim.Render(wrapTo(
+		"Nothing is sent to the server yet. You will get an empty policy to edit, a diff to review, "+
+			"and a confirmation before it is created.",
+		max(20, m.width-2))))
+	b.WriteString("\n\n")
+	b.WriteString(m.styles.Label.Render(pad("name", 8)) + m.remoteName.View())
+	b.WriteString("\n")
 	return b.String()
 }
