@@ -213,7 +213,7 @@ func TestReadCapturesRevisionMetadataAndWarnings(t *testing.T) {
 	if !policy.Revision.HasVersion || policy.Revision.Version != 3 {
 		t.Errorf("revision = %+v, want version 3", policy.Revision)
 	}
-	if !policy.Revision.CASRequired {
+	if policy.Revision.Metadata.CASRequired == nil || !*policy.Revision.Metadata.CASRequired {
 		t.Error("cas_required was not carried through")
 	}
 	if policy.Revision.Modified.IsZero() {
@@ -254,7 +254,10 @@ func TestReadAcceptsAVersionOfZero(t *testing.T) {
 	}
 }
 
-func TestUpdateSendsPatchCarryingThePreviouslyReadVersion(t *testing.T) {
+func TestUpdateSendsPostCarryingThePreviouslyReadVersion(t *testing.T) {
+	// POST, not PATCH. OpenBao 2.5.2's sys/policies/acl answers 405
+	// "unsupported operation" to PATCH — measured against a live instance
+	// on 2026-09-18 — so the verb BPE sent until then could never succeed.
 	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 8}})
 	})
@@ -265,8 +268,11 @@ func TestUpdateSendsPatchCarryingThePreviouslyReadVersion(t *testing.T) {
 	}
 
 	req := fake.only(t)
-	if req.Method != http.MethodPatch {
-		t.Errorf("method = %s, want PATCH — POST resets unspecified fields to defaults", req.Method)
+	if req.Method != http.MethodPost {
+		t.Errorf("method = %s, want POST — this endpoint does not implement PATCH", req.Method)
+	}
+	if req.Method == http.MethodPatch {
+		t.Error("PATCH is not implemented by this endpoint and must never be sent")
 	}
 	if req.Path != "/v1/sys/policies/acl/deploy" {
 		t.Errorf("path = %s", req.Path)
@@ -274,20 +280,62 @@ func TestUpdateSendsPatchCarryingThePreviouslyReadVersion(t *testing.T) {
 	if got := jsonNumber(t, req.Body["cas"]); got != 7 {
 		t.Errorf("cas = %v, want the version read earlier (7)", req.Body["cas"])
 	}
-	if req.ContentType != mergePatchContentType {
-		t.Errorf("content type = %q, want %q", req.ContentType, mergePatchContentType)
+	if req.Body["policy"] != "path \"a\" {}\n" {
+		t.Errorf("policy = %v, want the body being saved", req.Body["policy"])
 	}
 }
 
-func TestUpdateSendsOnlyThePolicyAndCas(t *testing.T) {
-	// The fields BPE does not model — expiration, ttl, cas_required, the
-	// identity-template flags — must not appear in the body at all. PATCH
-	// preserves what it is not told about; naming a field would set it.
+func TestUpdatePreservesTheMetadataTheReadReported(t *testing.T) {
+	// POST resets every field it is not sent, so the writable fields a
+	// read reported have to be handed back or the update destroys them.
+	// Measured against OpenBao 2.5.2: a POST carrying only policy and cas
+	// cleared both expiration and cas_required.
+	expiration := "2030-01-01T00:00:00Z"
+	casRequired := true
+	wildcards := true
+	slashes := false
+
 	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{})
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 9}})
 	})
 
-	rev := Revision{Version: 2, HasVersion: true, CASRequired: true}
+	rev := Revision{Version: 8, HasVersion: true, Metadata: Metadata{
+		Expiration:                        &expiration,
+		CASRequired:                       &casRequired,
+		AllowWildcardsInIdentityTemplates: &wildcards,
+		AllowSlashesInIdentityTemplates:   &slashes,
+	}}
+	if _, err := fake.client(t).Update(context.Background(), "deploy", "path \"a\" {}\n", rev); err != nil {
+		t.Fatalf("Update returned an error: %v", err)
+	}
+
+	body := fake.only(t).Body
+	for field, want := range map[string]any{
+		"expiration":                            expiration,
+		"cas_required":                          true,
+		"allow_wildcards_in_identity_templates": true,
+		"allow_slashes_in_identity_templates":   false,
+	} {
+		got, present := body[field]
+		if !present {
+			t.Errorf("%s was not sent back; POST would clear it", field)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v exactly as the server reported it", field, got, want)
+		}
+	}
+}
+
+func TestUpdateOmitsMetadataTheServerDidNotReport(t *testing.T) {
+	// A field the server never mentioned is not invented. Sending a zero
+	// value would *set* it — turning cas_required on for a policy that
+	// never had it, or giving an unexpiring policy an expiry.
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 3}})
+	})
+
+	rev := Revision{Version: 2, HasVersion: true}
 	if _, err := fake.client(t).Update(context.Background(), "deploy", "path \"a\" {}\n", rev); err != nil {
 		t.Fatalf("Update returned an error: %v", err)
 	}
@@ -296,12 +344,146 @@ func TestUpdateSendsOnlyThePolicyAndCas(t *testing.T) {
 	if len(body) != 2 {
 		t.Errorf("body carried %d fields, want exactly policy and cas: %+v", len(body), body)
 	}
-	for _, unwanted := range []string{"cas_required", "expiration", "ttl",
+	for _, unwanted := range []string{"expiration", "cas_required",
 		"allow_wildcards_in_identity_templates", "allow_slashes_in_identity_templates"} {
 		if _, present := body[unwanted]; present {
-			t.Errorf("body included %q — PATCH preserves fields it is not told about, "+
-				"so naming one would overwrite the server's own setting", unwanted)
+			t.Errorf("body included %q, which the read never reported", unwanted)
 		}
+	}
+}
+
+func TestUpdateDistinguishesAbsentFromFalse(t *testing.T) {
+	// The reason Metadata's fields are pointers. An explicitly false
+	// cas_required and an absent one are different server states, and
+	// collapsing them means a POST that silently changes one of them.
+	no := false
+
+	for _, tc := range []struct {
+		name     string
+		metadata Metadata
+		wantSent bool
+		wantVal  any
+	}{
+		{"explicitly false is sent as false", Metadata{CASRequired: &no}, true, false},
+		{"absent is not sent at all", Metadata{}, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 2}})
+			})
+			rev := Revision{Version: 1, HasVersion: true, Metadata: tc.metadata}
+			if _, err := fake.client(t).Update(context.Background(), "p", "path \"a\" {}\n", rev); err != nil {
+				t.Fatalf("Update returned an error: %v", err)
+			}
+			got, present := fake.only(t).Body["cas_required"]
+			if present != tc.wantSent {
+				t.Fatalf("cas_required present = %v, want %v", present, tc.wantSent)
+			}
+			if present && got != tc.wantVal {
+				t.Errorf("cas_required = %v, want %v", got, tc.wantVal)
+			}
+		})
+	}
+}
+
+func TestUpdateNeverSendsTtl(t *testing.T) {
+	// The server stores ttl as an absolute expiration. Replaying the
+	// original relative value on every update would push the expiry
+	// further out each time the policy was edited, so a policy meant to
+	// lapse would quietly become permanent.
+	expiration := "2026-10-18T15:30:50.805710913-04:00"
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 4}})
+	})
+
+	// A read of a ttl-created policy reports expiration, never ttl — so a
+	// ttl can only reach an update by being invented.
+	rev := Revision{Version: 3, HasVersion: true, Metadata: Metadata{Expiration: &expiration}}
+	if _, err := fake.client(t).Update(context.Background(), "p", "path \"a\" {}\n", rev); err != nil {
+		t.Fatalf("Update returned an error: %v", err)
+	}
+
+	body := fake.only(t).Body
+	if _, present := body["ttl"]; present {
+		t.Error("an update sent ttl; it must preserve the absolute expiration instead")
+	}
+	if body["expiration"] != expiration {
+		t.Errorf("expiration = %v, want the server's own value %q unreformatted",
+			body["expiration"], expiration)
+	}
+}
+
+func TestUpdateSendsNoEnvelopeFields(t *testing.T) {
+	// name, version, modified and warnings describe the policy rather than
+	// configure it. Echoing them back is at best ignored and at worst
+	// rejected.
+	expiration := "2030-01-01T00:00:00Z"
+	casRequired := true
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 6}})
+	})
+
+	rev := Revision{
+		Version: 5, HasVersion: true,
+		Modified: time.Now(),
+		Metadata: Metadata{Expiration: &expiration, CASRequired: &casRequired},
+	}
+	if _, err := fake.client(t).Update(context.Background(), "p", "path \"a\" {}\n", rev); err != nil {
+		t.Fatalf("Update returned an error: %v", err)
+	}
+
+	body := fake.only(t).Body
+	for _, envelope := range []string{"name", "version", "modified", "warnings"} {
+		if _, present := body[envelope]; present {
+			t.Errorf("body included the envelope field %q", envelope)
+		}
+	}
+}
+
+func TestMetadataRoundTripsFromAReadIntoAnUpdate(t *testing.T) {
+	// The whole point, end to end: what a read reports is what an update
+	// puts back, without the caller having to know the field names.
+	var requests int
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+				"name":                                  "deploy",
+				"policy":                                "path \"a\" {}\n",
+				"version":                               11,
+				"cas_required":                          true,
+				"expiration":                            "2031-06-01T00:00:00Z",
+				"allow_wildcards_in_identity_templates": true,
+			}})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 12}})
+	})
+
+	client := fake.client(t)
+	policy, err := client.Read(context.Background(), "deploy")
+	if err != nil {
+		t.Fatalf("Read returned an error: %v", err)
+	}
+	if _, err := client.Update(context.Background(), "deploy", "path \"b\" {}\n", policy.Revision); err != nil {
+		t.Fatalf("Update returned an error: %v", err)
+	}
+
+	body := fake.requests[len(fake.requests)-1].Body
+	if body["cas_required"] != true {
+		t.Errorf("cas_required = %v, want true carried from the read", body["cas_required"])
+	}
+	if body["expiration"] != "2031-06-01T00:00:00Z" {
+		t.Errorf("expiration = %v, want the read's value", body["expiration"])
+	}
+	if body["allow_wildcards_in_identity_templates"] != true {
+		t.Errorf("wildcard flag = %v, want true", body["allow_wildcards_in_identity_templates"])
+	}
+	if _, present := body["allow_slashes_in_identity_templates"]; present {
+		t.Error("the slashes flag was sent although the read never reported it")
+	}
+	if got := jsonNumber(t, body["cas"]); got != 11 {
+		t.Errorf("cas = %v, want the version the read reported", body["cas"])
 	}
 }
 
@@ -419,6 +601,11 @@ func TestStaleCasMapsToConflictAndExitCodeFour(t *testing.T) {
 		status int
 		body   any
 	}{
+		// The exact string a live OpenBao 2.5.2 returned on 2026-09-18,
+		// captured during the FSM-17 smoke test. This is the one shape
+		// that is measured rather than anticipated.
+		{"400, verbatim from a live OpenBao 2.5.2", http.StatusBadRequest,
+			errorBody("check-and-set parameter did not match the current version")},
 		{"400 with the canonical message", http.StatusBadRequest,
 			errorBody("check-and-set parameter did not match the current version")},
 		{"400 with a cas mismatch phrasing", http.StatusBadRequest,
@@ -722,5 +909,399 @@ func jsonNumber(t *testing.T, value any) int {
 	default:
 		t.Fatalf("value %v (%T) is not a number", value, value)
 		return 0
+	}
+}
+
+// TestCreateCollisionFromALiveServerIsAConflict pins the create half of
+// the same question, with the message a live OpenBao 2.5.2 actually
+// returned when cas = -1 hit an existing policy (measured 2026-09-18).
+//
+// It matters because a create collision that fell through to a generic
+// failure would reach the editor as "something went wrong" rather than as
+// the name-is-taken question, which is the one place the user is offered
+// the existing policy instead.
+func TestCreateCollisionFromALiveServerIsAConflict(t *testing.T) {
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusBadRequest,
+			errorBody("check-and-set parameter set to -1 on existing entry"))
+	})
+
+	_, err := fake.client(t).Create(context.Background(), "deploy", "path \"a\" {}\n")
+
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("error = %v, want ErrConflict", err)
+	}
+	if apperr.CodeOf(err) != apperr.ExitConflict {
+		t.Errorf("exit code = %v, want %v", apperr.CodeOf(err), apperr.ExitConflict)
+	}
+}
+
+// TestErrorsNameTheOperationExactlyOnce guards a message the user
+// actually saw: "updating policy X: updating policy X failed: ...". The
+// client names the operation, and the editor used to name it again.
+func TestErrorsNameTheOperationExactlyOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(c *Client) error
+		op   string
+	}{
+		{"update", func(c *Client) error {
+			_, err := c.Update(context.Background(), "deploy", "path \"a\" {}\n",
+				Revision{Version: 1, HasVersion: true})
+			return err
+		}, "updating policy deploy"},
+		{"create", func(c *Client) error {
+			_, err := c.Create(context.Background(), "deploy", "path \"a\" {}\n")
+			return err
+		}, "creating policy deploy"},
+		{"read", func(c *Client) error {
+			_, err := c.Read(context.Background(), "deploy")
+			return err
+		}, "reading policy deploy"},
+		{"delete", func(c *Client) error {
+			return c.Delete(context.Background(), "deploy")
+		}, "deleting policy deploy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, http.StatusInternalServerError, errorBody("upstream exploded"))
+			})
+
+			err := tc.call(fake.client(t))
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := strings.Count(err.Error(), tc.op); got != 1 {
+				t.Errorf("the message names %q %d times, want exactly once:\n%s",
+					tc.op, got, err.Error())
+			}
+		})
+	}
+}
+
+// TestAWriteWithNoVersionInItsResponseIsReadBack covers the consequence of
+// this endpoint answering a successful write with 204 and no body, which
+// is what a live OpenBao 2.5.2 does.
+//
+// Without the read-back, every second update in a session would be refused
+// for lack of conflict protection, and the metadata carried into it would
+// be empty — which is how a POST silently clears what it is not sent.
+func TestAWriteWithNoVersionInItsResponseIsReadBack(t *testing.T) {
+	var methods []string
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+				"policy":       "path \"a\" {}\n",
+				"version":      42,
+				"cas_required": true,
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent) // exactly what 2.5.2 answers
+	})
+
+	result, err := fake.client(t).Update(context.Background(), "deploy", "path \"a\" {}\n",
+		Revision{Version: 41, HasVersion: true})
+	if err != nil {
+		t.Fatalf("Update returned an error: %v", err)
+	}
+
+	if !result.Revision.HasVersion || result.Revision.Version != 42 {
+		t.Errorf("revision = %+v, want version 42 read back after the write", result.Revision)
+	}
+	if result.Revision.Metadata.CASRequired == nil || !*result.Revision.Metadata.CASRequired {
+		t.Error("the metadata was not picked up by the read-back, so the next update would clear it")
+	}
+	if len(methods) != 2 || methods[0] != http.MethodPost || methods[1] != http.MethodGet {
+		t.Errorf("requests = %v, want a POST then a GET", methods)
+	}
+}
+
+// TestAFailedReadBackStillReportsTheWriteAsSucceeded — the policy has
+// already changed on the server, so reporting a failure would invite the
+// caller to retry a write that already landed.
+func TestAFailedReadBackStillReportsTheWriteAsSucceeded(t *testing.T) {
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusInternalServerError, errorBody("gone away"))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	result, err := fake.client(t).Update(context.Background(), "deploy",
+		"path \"a\" {}\n", Revision{Version: 1, HasVersion: true})
+
+	if err != nil {
+		t.Fatalf("Update reported a failure although the write succeeded: %v", err)
+	}
+	if result.Revision.HasVersion {
+		t.Error("a version was reported although the read-back failed")
+	}
+}
+
+// --- read-after-write must read back what BPE actually wrote ---
+
+// TestAReadBackOfAnotherClientsWriteIsNotAdopted is the regression test
+// for the conflict-detection bypass found in review of pull request 9.
+//
+// The sequence is the whole point, so it is written out literally: BPE's
+// POST lands as version 5, another client writes different content as
+// version 6, and BPE's follow-up GET — which exists only to learn the
+// version, because this endpoint answers a write with 204 and no body —
+// sees version 6 and the other client's text.
+//
+// Adopting revision 6 there would attach the other client's version to
+// BPE's own unchanged document, so the *next* save would send cas = 6,
+// match, and overwrite their change with no conflict ever shown. The
+// check-and-set cannot catch it: by then the version being sent is the
+// current one.
+func TestAReadBackOfAnotherClientsWriteIsNotAdopted(t *testing.T) {
+	const ours = "path \"a\" {}\n"
+	const theirs = "path \"somewhere/else\" {}\n"
+
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+				"policy":  theirs, // not what BPE wrote
+				"version": 6,
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent) // what 2.5.2 answers a write with
+	})
+
+	client := fake.client(t)
+	result, err := client.Update(context.Background(), "deploy", ours,
+		Revision{Version: 4, HasVersion: true})
+	if err != nil {
+		t.Fatalf("Update reported a failure although the write succeeded: %v", err)
+	}
+
+	if result.Revision.HasVersion {
+		t.Fatalf("adopted version %d for a body BPE never wrote; the next cas would match and overwrite",
+			result.Revision.Version)
+	}
+	if len(result.Warnings) == 0 {
+		t.Error("the caller was told nothing about the policy having changed again")
+	}
+
+	// And the refusal is real: the update built from that result never
+	// reaches the server.
+	sent := len(fake.recorded())
+	_, err = client.Update(context.Background(), "deploy", ours, result.Revision)
+	if !errors.Is(err, ErrConflictProtectionUnsupported) {
+		t.Fatalf("the following update returned %v, want ErrConflictProtectionUnsupported", err)
+	}
+	if len(fake.recorded()) != sent {
+		t.Error("the following update reached the server; it must be refused before any request")
+	}
+}
+
+// TestACreateReadBackOfAnotherClientsWriteIsNotAdopted — the same hazard,
+// on the other path that re-reads. Create and Update share
+// revisionAfterWrite, so a fix applied to only one of them would leave the
+// bypass open on whichever was missed.
+func TestACreateReadBackOfAnotherClientsWriteIsNotAdopted(t *testing.T) {
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+				"policy":  "path \"theirs\" {}\n",
+				"version": 2,
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	result, err := fake.client(t).Create(context.Background(), "deploy", "path \"ours\" {}\n")
+	if err != nil {
+		t.Fatalf("Create reported a failure although the write succeeded: %v", err)
+	}
+	if result.Revision.HasVersion {
+		t.Errorf("adopted version %d for a body BPE never wrote", result.Revision.Version)
+	}
+	if len(result.Warnings) == 0 {
+		t.Error("the caller was told nothing about the policy having changed again")
+	}
+}
+
+// TestAReadBackOfOurOwnWriteIsAdopted is the other half: the ordinary
+// case must keep working, or every second update in a session would be
+// refused for lack of conflict protection.
+func TestAReadBackOfOurOwnWriteIsAdopted(t *testing.T) {
+	const body = "path \"a\" {}\n"
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+				"policy":       body,
+				"version":      5,
+				"cas_required": true,
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	result, err := fake.client(t).Update(context.Background(), "deploy", body,
+		Revision{Version: 4, HasVersion: true})
+	if err != nil {
+		t.Fatalf("Update returned an error: %v", err)
+	}
+	if !result.Revision.HasVersion || result.Revision.Version != 5 {
+		t.Errorf("revision = %+v, want version 5 read back after the write", result.Revision)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("an unremarkable write produced warnings: %v", result.Warnings)
+	}
+}
+
+// --- metadata BPE cannot preserve ---
+
+// TestMalformedMetadataIsReadableButNotUpdatable is the second finding
+// from the same review: metadataFrom used to treat "the server did not
+// report this field" and "the server reported it in a shape I do not
+// recognize" identically. Both left the field's pointer nil, so the update
+// omitted it — and on a POST, omitting a field clears it. A cas_required
+// arriving as the string "true" would therefore have switched the
+// requirement off.
+//
+// Each case proves three things: the policy still reads, the update is
+// refused, and nothing reached the server.
+func TestMalformedMetadataIsReadableButNotUpdatable(t *testing.T) {
+	const body = "path \"a\" {}\n"
+
+	for _, tc := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{"expiration as a number", "expiration", 1789596826808},
+		{"expiration as a boolean", "expiration", true},
+		{"expiration as an object", "expiration", map[string]any{"at": "2030-01-01"}},
+		{"cas_required as a string", "cas_required", "true"},
+		{"cas_required as a number", "cas_required", 1},
+		{"wildcards flag as a string", "allow_wildcards_in_identity_templates", "yes"},
+		{"wildcards flag as a number", "allow_wildcards_in_identity_templates", 1},
+		{"slashes flag as a string", "allow_slashes_in_identity_templates", "false"},
+		{"slashes flag as a list", "allow_slashes_in_identity_templates", []any{true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+					"policy":  body,
+					"version": 3,
+					tc.field:  tc.value,
+				}})
+			})
+			client := fake.client(t)
+
+			// Readable: refusing to show the policy would be worse than
+			// saying it cannot be written back.
+			policy, err := client.Read(context.Background(), "deploy")
+			if err != nil {
+				t.Fatalf("Read returned an error: %v", err)
+			}
+			if policy.Body != body {
+				t.Errorf("body = %q, want the policy as stored", policy.Body)
+			}
+			if got := policy.Revision.Metadata.Unpreservable; len(got) != 1 || got[0] != tc.field {
+				t.Fatalf("Unpreservable = %v, want exactly [%s]", got, tc.field)
+			}
+			if policy.Revision.Metadata.Preservable() {
+				t.Error("metadata reported as preservable although a field could not be read")
+			}
+
+			// Not updatable, and refused before a request is built.
+			reads := len(fake.recorded())
+			_, err = client.Update(context.Background(), "deploy", body, policy.Revision)
+			if !errors.Is(err, ErrMetadataNotPreservable) {
+				t.Fatalf("Update error = %v, want ErrMetadataNotPreservable", err)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("the error does not name the field that blocked it: %v", err)
+			}
+			if len(fake.recorded()) != reads {
+				t.Error("a write reached the server; the refusal must come before any request")
+			}
+		})
+	}
+}
+
+// TestEveryWritableFieldIsShapeChecked drives the same assertion off
+// writableFields itself, so a field added to that table later cannot be
+// added without this protection.
+func TestEveryWritableFieldIsShapeChecked(t *testing.T) {
+	const body = "path \"a\" {}\n"
+
+	for _, field := range writableFields {
+		t.Run(field.name, func(t *testing.T) {
+			// An object is not a valid shape for any preserved field, now
+			// or plausibly ever.
+			fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+					"policy":   body,
+					"version":  1,
+					field.name: map[string]any{"unexpected": true},
+				}})
+			})
+			client := fake.client(t)
+
+			policy, err := client.Read(context.Background(), "deploy")
+			if err != nil {
+				t.Fatalf("Read returned an error: %v", err)
+			}
+			if got := policy.Revision.Metadata.Unpreservable; len(got) != 1 || got[0] != field.name {
+				t.Fatalf("Unpreservable = %v, want exactly [%s]", got, field.name)
+			}
+
+			reads := len(fake.recorded())
+			if _, err := client.Update(context.Background(), "deploy", body, policy.Revision); !errors.Is(err, ErrMetadataNotPreservable) {
+				t.Fatalf("Update error = %v, want ErrMetadataNotPreservable", err)
+			}
+			if len(fake.recorded()) != reads {
+				t.Error("a write reached the server")
+			}
+		})
+	}
+}
+
+// TestANullMetadataFieldCountsAsAbsent — a JSON null says the field has no
+// value, so omitting it from the update changes nothing that is not
+// already changed. Refusing there would block a save that cannot lose
+// anything. Kevin's decision, 2026-09-18.
+func TestANullMetadataFieldCountsAsAbsent(t *testing.T) {
+	const body = "path \"a\" {}\n"
+	fake := newFakeBao(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+				"policy":       body,
+				"version":      2,
+				"expiration":   nil,
+				"cas_required": nil,
+			}})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 3}})
+	})
+
+	client := fake.client(t)
+	policy, err := client.Read(context.Background(), "deploy")
+	if err != nil {
+		t.Fatalf("Read returned an error: %v", err)
+	}
+	if !policy.Revision.Metadata.Preservable() {
+		t.Fatalf("a null field was treated as unpreservable: %v", policy.Revision.Metadata.Unpreservable)
+	}
+
+	if _, err := client.Update(context.Background(), "deploy", body, policy.Revision); err != nil {
+		t.Fatalf("Update returned an error: %v", err)
+	}
+	sent := fake.recorded()[len(fake.recorded())-1].Body
+	for _, absent := range []string{"expiration", "cas_required"} {
+		if _, present := sent[absent]; present {
+			t.Errorf("%q was sent although the server reported it as null", absent)
+		}
 	}
 }

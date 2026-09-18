@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -1217,5 +1218,160 @@ func TestDeletingTheOpenPolicyMakesTheNextSaveACreate(t *testing.T) {
 	}
 	if m.problem == "" {
 		t.Error("deleting the policy being edited said nothing about it")
+	}
+}
+
+// --- metadata and error wording, after the OpenBao 2.5.2 findings ---
+
+// TestTheEditorCarriesPolicyMetadataAcrossAnEdit proves the editor does
+// not drop what the read reported on its way to the write.
+//
+// internal/baoclient is what puts the fields back on the wire, but it can
+// only put back what it is handed — and the editor is what hands it over,
+// through the session's revision. A session that kept only the version
+// number would silently clear a policy's expiration on every save, and
+// every test in internal/baoclient would still pass.
+func TestTheEditorCarriesPolicyMetadataAcrossAnEdit(t *testing.T) {
+	expiration := "2031-06-01T00:00:00Z"
+	casRequired := true
+	wildcards := false
+
+	store := newFakeStore("https://bao.test:8200")
+	store.seedWithMetadata("team-a", remotePolicyBody, 4, baoclient.Metadata{
+		Expiration:                        &expiration,
+		CASRequired:                       &casRequired,
+		AllowWildcardsInIdentityTemplates: &wildcards,
+	})
+
+	m := openRemotePolicy(t, store, "team-a")
+	step(t, m, "d", "s", "ctrl+s")
+
+	if m.session.Dirty() {
+		t.Fatalf("the update did not succeed; problem = %q", m.problem)
+	}
+
+	sent := store.lastUpdateRevision.Metadata
+	if sent.Expiration == nil || *sent.Expiration != expiration {
+		t.Errorf("expiration sent = %v, want %q carried from the read", sent.Expiration, expiration)
+	}
+	if sent.CASRequired == nil || !*sent.CASRequired {
+		t.Error("cas_required was not carried across the edit")
+	}
+	if sent.AllowWildcardsInIdentityTemplates == nil || *sent.AllowWildcardsInIdentityTemplates {
+		t.Error("the wildcard flag was not carried across the edit as an explicit false")
+	}
+	if sent.AllowSlashesInIdentityTemplates != nil {
+		t.Error("a flag the read never reported was invented on the way out")
+	}
+
+	// And it is still on the server afterwards, which is the thing that
+	// actually matters to whoever owns the policy.
+	held := store.metadataOf("team-a")
+	if held.Expiration == nil || *held.Expiration != expiration {
+		t.Errorf("expiration on the server after the edit = %v, want it unchanged", held.Expiration)
+	}
+	if held.CASRequired == nil || !*held.CASRequired {
+		t.Error("cas_required was cleared by the edit")
+	}
+}
+
+// TestASecondEditInOneSessionStillHasConflictProtection covers the
+// consequence of a successful write answering 204 with no body: without a
+// read-back the session would hold no version, and the next save would be
+// refused rather than protected.
+func TestASecondEditInOneSessionStillHasConflictProtection(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seed("team-a", remotePolicyBody, 4)
+
+	m := openRemotePolicy(t, store, "team-a")
+	step(t, m, "d", "s", "ctrl+s")
+	if m.session.Dirty() {
+		t.Fatalf("the first update did not succeed; problem = %q", m.problem)
+	}
+
+	rev, exists, ok := m.session.RemoteRevision()
+	if !ok || !exists || !rev.HasVersion {
+		t.Fatalf("after one update the session holds no usable version: %+v", rev)
+	}
+
+	// A second edit in the same session goes through on its own.
+	step(t, m, "d", "s", "ctrl+s")
+	if m.session.Dirty() {
+		t.Errorf("the second update was refused; problem = %q", m.problem)
+	}
+	if m.problem != "" {
+		t.Errorf("the second update reported a problem: %q", m.problem)
+	}
+}
+
+// TestAFailedWriteNamesTheOperationOnce is the editor half of the
+// duplicated-context fix. The client already says what failed; the editor
+// used to say it again, producing "updating policy X: updating policy X
+// failed: ...".
+func TestAFailedWriteNamesTheOperationOnce(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seed("team-a", remotePolicyBody, 4)
+
+	// Shaped like a real client error, which always names its operation.
+	store.errs["update:team-a"] = errors.New(
+		"updating policy team-a failed: Error making API request.")
+
+	m := openRemotePolicy(t, store, "team-a")
+	step(t, m, "d", "s", "ctrl+s")
+
+	if got := strings.Count(m.problem, "updating policy team-a"); got != 1 {
+		t.Errorf("the status line names the operation %d times, want once:\n%s", got, m.problem)
+	}
+	if strings.HasPrefix(m.problem, "updating policy team-a: updating policy team-a") {
+		t.Error("the editor prefixed the error with the operation the error already named")
+	}
+}
+
+// TestAPolicyWithUnpreservableMetadataSaysSoOnOpen — a policy whose
+// server-side metadata BPE cannot put back cannot be saved, and the user
+// finds that out when they open it rather than after they have edited it.
+//
+// The refusal itself lives in internal/baoclient, which is where it is
+// tested; what this proves is that the editor surfaces the condition at
+// open time and still refuses the write.
+func TestAPolicyWithUnpreservableMetadataSaysSoOnOpen(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seedWithMetadata("team-a", remotePolicyBody, 4, baoclient.Metadata{
+		Unpreservable: []string{"cas_required"},
+	})
+
+	m := openRemotePolicy(t, store, "team-a")
+
+	if !strings.Contains(m.problem, "cas_required") {
+		t.Errorf("opening the policy did not name the field BPE cannot preserve: problem = %q", m.problem)
+	}
+
+	step(t, m, "d", "s", "ctrl+s")
+
+	if got, _ := store.bodyOf("team-a"); got != remotePolicyBody {
+		t.Error("the update reached the server although its metadata could not be preserved")
+	}
+	if !strings.Contains(m.problem, "cas_required") {
+		t.Errorf("the refused save did not name the field that blocked it: problem = %q", m.problem)
+	}
+}
+
+// TestBothOpenTimeWarningsAreShownTogether — a server can report neither a
+// version nor usable metadata, and each has its own consequence. Assigning
+// one message after the other would drop the first, which is the defect
+// already fixed once for the messages shown after a write.
+func TestBothOpenTimeWarningsAreShownTogether(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seedUnversioned("team-a", remotePolicyBody, baoclient.Metadata{
+		Unpreservable: []string{"expiration"},
+	})
+
+	m := openRemotePolicy(t, store, "team-a")
+
+	if !strings.Contains(m.problem, "did not report a version") {
+		t.Errorf("the missing version was not reported: problem = %q", m.problem)
+	}
+	if !strings.Contains(m.problem, "expiration") {
+		t.Errorf("the unpreservable field was not reported: problem = %q", m.problem)
 	}
 }

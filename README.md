@@ -482,22 +482,60 @@ as `cas`, and the server refuses the write if the policy has changed since
 
 Three consequences worth knowing:
 
-- **An update is PATCH, not POST.** OpenBao resets unspecified fields to
-  their defaults on POST and preserves them on PATCH. A policy can carry
-  an `expiration`, a `ttl`, `cas_required`, or the identity-template
-  flags, none of which BPE models — so POST would silently clear whichever
-  of them were set. BPE sends exactly two fields: `policy` and `cas`.
+- **An update is a POST carrying `cas`, and it echoes the policy's
+  metadata back.** POST resets every field it is not sent, so an update
+  that named only `policy` and `cas` would silently clear a policy's
+  `expiration` and `cas_required`. BPE therefore sends back, unchanged,
+  the writable fields the preceding read reported: `expiration`,
+  `cas_required`, and the two identity-template flags. A field the server
+  did not report is not sent, so nothing is invented and no setting is
+  turned on that was not already on.
 - **A create is POST with `cas = -1`**, OpenBao's "this must not already
   exist" value. A policy that appeared between listing and writing is a
-  conflict, not something to overwrite.
-- **`cas_required` is read but never sent.** It is the server's own
-  per-policy setting, and turning it on would change the rules for every
-  other client of that policy on BPE's say-so.
+  conflict, not something to overwrite. A create has no metadata to
+  preserve, so it sends none.
+- **`ttl` is never sent on an update.** The server stores it as an
+  absolute `expiration`, so replaying the original relative value each
+  time a policy was edited would push its expiry further out on every
+  save — a policy meant to lapse would quietly become permanent. The
+  absolute expiration is preserved instead.
+
+#### OpenBao version compatibility
+
+**Updates use POST on every version.** OpenBao 2.5.x does not implement
+PATCH for `sys/policies/acl/:name` — a PATCH there returns `405
+unsupported operation`, measured against a live 2.5.2 instance on
+2026-09-18. Newer OpenBao releases document PATCH for this endpoint, but
+BPE uses the POST form regardless, because POST is accepted by both and
+discovering support at runtime would mean sending a write expected to
+fail. There is no PATCH-then-POST fallback.
+
+This is why the metadata echo above exists: PATCH would have preserved
+those fields for free, and POST does not.
+
+**`cas_required` is echoed, not set.** BPE sends back exactly the value
+the server just reported, which preserves the setting rather than changing
+it. Omitting it is what would change it — by clearing it. BPE never turns
+`cas_required` on for a policy that did not already have it, because a
+policy without it reports `false` and gets `false` back. (Before
+2026-09-18 BPE read this field and deliberately never sent it; that was
+correct for PATCH and destructive for POST.)
 
 **If a server does not return usable version metadata, an update is
 refused** rather than attempted. BPE does not fall back to re-reading and
 comparing before writing: that sequence has a race between the compare and
 the write, so it would report an update as conflict-safe when it was not.
+
+**And if a server reports one of those writable fields in a shape BPE does
+not recognize, the update is refused too** — a numeric `expiration`, a
+`cas_required` arriving as the string `"true"`. The policy still reads and
+can be inspected; it is the write that stops, before any request leaves
+BPE, naming the field that blocked it. There is no third option: BPE can
+either send the field back as the server gave it or omit it, and on a POST
+omitting it clears the setting. Guessing at what the value meant would be
+writing a value the server never sent. A field the server reports as
+`null` is not this case — `null` says there is no value, so leaving it out
+changes nothing.
 
 **Deletion has no equivalent.** This endpoint offers no check-and-set for
 DELETE, so a delete cannot be made atomic against a concurrent change. BPE
@@ -544,12 +582,43 @@ every one of those cases the next ordinary save carries the version BPE
 originally read, is refused again, and comes back through this same
 review — which is the right answer for a write that was never applied.
 
-One detail is undocumented upstream: OpenBao's API reference states
-neither the HTTP status code nor the error body for a failed
-check-and-set. BPE's detection is therefore deliberately broad — 409 and
-412 on their own, and 400 only when the body names a check-and-set
-problem — and biased toward reporting a conflict, since a conflict
-misreported as a bad request invites someone to force the write.
+OpenBao's API reference states neither the HTTP status code nor the error
+body for a failed check-and-set, so BPE's detection is deliberately broad
+— 409 and 412 on their own, and 400 only when the body names a
+check-and-set problem — and biased toward reporting a conflict, since a
+conflict misreported as a bad request invites someone to force the write.
+
+**What a live OpenBao 2.5.2 actually returns** (measured 2026-09-18):
+
+| Situation | Response |
+| --- | --- |
+| Update with a stale `cas` | `400` — `check-and-set parameter did not match the current version` |
+| Create with `cas = -1` onto an existing policy | `400` — `check-and-set parameter set to -1 on existing entry` |
+| A successful write | `204` with no body |
+
+Both error forms contain `check-and-set`, so both are recognized. The
+empty `204` is why a write is followed by a read: the response says
+nothing about the version it produced, and without reading it back the
+next update in the same session would have no version to send.
+
+**That read-back has to come back with what BPE wrote.** There is a gap
+between the write and the read, and another client can write in it — so
+the version the read reports is not necessarily the version of BPE's own
+text. Adopting it anyway would attach someone else's version to an
+unchanged local document, and the next save would then send that version,
+match, and overwrite their change without ever showing a conflict; the
+check-and-set cannot catch it, because by then the version being sent is
+the current one. So BPE compares the returned policy against what it just
+wrote, byte for byte. If they differ, the write is still reported as
+having succeeded — it did — but no version is adopted, and you are told
+the policy changed again and must re-open it. The next update is refused
+until you do.
+
+**An expiration may be re-rendered by the server.** A policy whose
+expiration came from a `ttl` reads back in the server's local offset until
+its first update, and in UTC afterwards. BPE sends the string exactly as
+it was given; the server normalizes it on write. The instant is
+unchanged — verified to the nanosecond — and stable from then on.
 
 ### Security behavior
 

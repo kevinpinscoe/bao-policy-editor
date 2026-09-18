@@ -1164,10 +1164,23 @@ func (m *Model) handleOpened(msg remoteOpenedMsg) (tea.Model, tea.Cmd) {
 	m.adoptSession(session)
 	m.screen = screenEditor
 	m.status = "opened " + msg.policy.Name + " from " + m.store.Address()
+
+	// Both of these make the policy unsaveable, for different reasons, and
+	// either can be true without the other — so they are joined rather
+	// than assigned in turn. Saying so at open time rather than at the
+	// refused save is the point: the user finds out before they spend an
+	// hour editing something BPE will not write back.
+	var notes []string
 	if !msg.policy.Revision.HasVersion {
-		m.problem = "this server did not report a version for " + msg.policy.Name +
-			"; BPE will refuse to update it rather than write without conflict protection"
+		notes = append(notes, "this server did not report a version for "+msg.policy.Name+
+			"; BPE will refuse to update it rather than write without conflict protection")
 	}
+	if fields := msg.policy.Revision.Metadata.Unpreservable; len(fields) > 0 {
+		notes = append(notes, "this server reported "+strings.Join(fields, ", ")+" for "+
+			msg.policy.Name+" in a form BPE cannot send back;"+
+			" it will refuse to update rather than clear what it cannot preserve")
+	}
+	m.problem = strings.Join(notes, " | ")
 	return m, nil
 }
 
@@ -1308,7 +1321,8 @@ func (m *Model) handleRemoteErr(msg remoteErrMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.problem = msg.during + ": " + msg.err.Error()
+	// The error already names the operation; see remoteErrMsg.
+	m.problem = msg.err.Error()
 
 	// A failure while connecting leaves nothing connected, so the connect
 	// screen is where the user can do something about it. A failure once
