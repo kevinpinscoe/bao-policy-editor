@@ -245,6 +245,91 @@ func TestRemoteUpdateShowsADiffAndRequiresConfirmation(t *testing.T) {
 	}
 }
 
+// TestASuccessfulWriteStaysInTheEditorAndKeepsItsMessage is the
+// regression for a successful save bouncing the user to the browser.
+//
+// The write used to be followed by a re-listing, whose reply moved to the
+// browser screen and replaced "updated team-a on the server" with a policy
+// count — so the confirmation and the screen were both lost to a refresh
+// nobody asked for.
+func TestASuccessfulWriteStaysInTheEditorAndKeepsItsMessage(t *testing.T) {
+	t.Run("update", func(t *testing.T) {
+		store := newFakeStore("https://bao.test:8200")
+		store.seed("team-a", remotePolicyBody, 4)
+
+		m := openRemotePolicy(t, store, "team-a")
+		step(t, m, "d", "s", "ctrl+s")
+
+		if m.screen != screenEditor {
+			t.Errorf("after a successful update, screen = %d, want the editor (%d)", m.screen, screenEditor)
+		}
+		if !strings.Contains(m.status, "updated team-a") {
+			t.Errorf("the success message was lost: status = %q", m.status)
+		}
+	})
+
+	t.Run("create", func(t *testing.T) {
+		store := newFakeStore("https://bao.test:8200")
+		store.seed("other", remotePolicyBody, 1)
+
+		m := connectTestModel(t, store)
+		step(t, m, "n")
+		typeInto(t, m, "team-new")
+		step(t, m, "enter", "a", "enter")
+		typeInto(t, m, "secret/data/mine/*")
+		step(t, m, "enter", "ctrl+s", "s", "ctrl+s")
+
+		if m.screen != screenEditor {
+			t.Errorf("after a successful create, screen = %d, want the editor (%d)", m.screen, screenEditor)
+		}
+		if !strings.Contains(m.status, "created team-new") {
+			t.Errorf("the success message was lost: status = %q", m.status)
+		}
+		if _, ok := store.bodyOf("team-new"); !ok {
+			t.Fatal("the create did not reach the server")
+		}
+
+		// The browser is still brought up to date, just without a refresh
+		// that would have moved the screen.
+		step(t, m, "r")
+		found := false
+		for _, name := range m.browse.visible() {
+			if name == "team-new" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the created policy is missing from the browser listing %v", m.browse.visible())
+		}
+	})
+}
+
+// TestASuccessfulDeleteKeepsItsMessageAndUpdatesTheListing is the same
+// rule for the other write.
+func TestASuccessfulDeleteKeepsItsMessageAndUpdatesTheListing(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seed("team-a", remotePolicyBody, 1)
+	store.seed("team-b", remotePolicyBody, 1)
+
+	m := connectTestModel(t, store)
+	selectPolicy(t, m, "team-a")
+	step(t, m, "x")
+	typeInto(t, m, "team-a")
+	step(t, m, "enter")
+
+	if !strings.Contains(m.status, "deleted team-a") {
+		t.Errorf("the delete confirmation was lost: status = %q", m.status)
+	}
+	for _, name := range m.browse.visible() {
+		if name == "team-a" {
+			t.Error("the deleted policy is still in the browser listing")
+		}
+	}
+	if len(m.browse.visible()) != 1 {
+		t.Errorf("browser listing = %v, want just team-b", m.browse.visible())
+	}
+}
+
 // --- conflicts ---
 
 // TestStaleUpdateIsRefusedAndKeepsTheEdits is the "stale versions do not
@@ -311,6 +396,13 @@ func TestRemoteConflictCancelKeepsTheEditsAndWritesNothing(t *testing.T) {
 		t.Fatalf("expected the conflict dialog, got %d", m.dialog)
 	}
 
+	// Exactly one update has been attempted at this point: the one the
+	// server refused. Counting it now is what makes the count after
+	// cancelling mean something.
+	if got := countCalls(store, "update:team-a"); got != 1 {
+		t.Fatalf("update attempts before cancelling = %d, want the single refused one", got)
+	}
+
 	step(t, m, "esc")
 	if m.dialog != dialogNone {
 		t.Error("esc did not dismiss the conflict dialog")
@@ -318,13 +410,94 @@ func TestRemoteConflictCancelKeepsTheEditsAndWritesNothing(t *testing.T) {
 	if string(m.session.Current()) != mine || !m.session.Dirty() {
 		t.Error("cancelling the conflict lost the edits")
 	}
-	for _, call := range store.callLog() {
-		if call == "update:team-a" && false {
-			t.Fatal("unreachable")
-		}
+	if got := countCalls(store, "update:team-a"); got != 1 {
+		t.Errorf("update attempts after cancelling = %d, want no further attempt beyond the refused one", got)
 	}
 	if got, _ := store.bodyOf("team-a"); got == mine {
 		t.Error("cancelling the conflict wrote to the server anyway")
+	}
+}
+
+// TestViewingTheServerDiffThenLeavingDoesNotLicenseAnOverwrite is the
+// regression for a bypass of the conflict review.
+//
+// Viewing the server's version used to move the session onto the revision
+// that read reported. The user could then press Escape, having confirmed
+// nothing, and an ordinary save afterwards would carry that newer revision
+// and be accepted — completing the overwrite they had backed out of, by a
+// route that never went through the conflict-review screen.
+//
+// The revision is now held aside and consumed only by ctrl+s from that
+// screen, so the save below must be refused exactly as the first one was.
+func TestViewingTheServerDiffThenLeavingDoesNotLicenseAnOverwrite(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seed("team-a", remotePolicyBody, 4)
+
+	m := openRemotePolicy(t, store, "team-a")
+	step(t, m, "d")
+	mine := string(m.session.Current())
+
+	const theirs = "path \"secret/data/theirs\" {\n  capabilities = [\"read\"]\n}\n"
+	store.seed("team-a", theirs, 9)
+
+	// The stale write is refused.
+	step(t, m, "s", "ctrl+s")
+	if m.dialog != dialogRemoteConflict {
+		t.Fatalf("the stale write was not refused (dialog = %d, problem = %q)", m.dialog, m.problem)
+	}
+
+	// The user looks at what is on the server, then backs out without
+	// confirming anything.
+	step(t, m, "v")
+	if m.reviewKind != reviewServerConflict {
+		t.Fatalf("v did not show the server diff (kind = %d)", m.reviewKind)
+	}
+	step(t, m, "esc")
+	if m.screen != screenEditor {
+		t.Fatalf("esc did not leave the conflict review (screen = %d)", m.screen)
+	}
+	if m.pendingRevision != nil {
+		t.Error("leaving the conflict review kept the revision it had fetched")
+	}
+
+	// An ordinary save now. It must be refused again: nothing was
+	// confirmed, so nothing may be overwritten.
+	step(t, m, "s", "ctrl+s")
+
+	if got, _ := store.bodyOf("team-a"); got != theirs {
+		t.Fatalf("an ordinary save after backing out of the conflict review overwrote the server:\n%s", got)
+	}
+	if m.dialog != dialogRemoteConflict {
+		t.Errorf("the second save was not refused as a conflict (dialog = %d, problem = %q)", m.dialog, m.problem)
+	}
+	if string(m.session.Current()) != mine || !m.session.Dirty() {
+		t.Error("the refused save disturbed the document")
+	}
+}
+
+// TestRetryingWithoutHavingFetchedIsRefused guards the other side of the
+// same rule: the retry path needs a revision from an actual re-read, not
+// merely the review screen being on display.
+func TestRetryingWithoutHavingFetchedIsRefused(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seed("team-a", remotePolicyBody, 4)
+
+	m := openRemotePolicy(t, store, "team-a")
+	step(t, m, "d")
+
+	// Put the review screen into the conflict state without a fetch
+	// behind it — the state a stale pending revision would have left.
+	m.screen = screenReview
+	m.reviewKind = reviewServerConflict
+	m.pendingRevision = nil
+
+	step(t, m, "ctrl+s")
+
+	if got, _ := store.bodyOf("team-a"); got != remotePolicyBody {
+		t.Error("a retry with no re-read behind it reached the server")
+	}
+	if m.problem == "" {
+		t.Error("a retry with no re-read behind it said nothing")
 	}
 }
 
@@ -414,15 +587,107 @@ func TestCreateConflictStaysACreateConflict(t *testing.T) {
 		}
 	}
 
-	// Opening the existing policy is a read, and produces a real revision —
-	// so the next write is a genuine, conflict-checked update.
+	draft := string(m.session.Current())
+
+	// Opening the existing policy replaces the document, so it asks before
+	// throwing the draft away rather than acting on the first keystroke.
 	step(t, m, "o")
+	if m.dialog != dialogRemoteDraftLoss {
+		t.Fatalf("o did not ask before discarding the draft (dialog = %d)", m.dialog)
+	}
+	if string(m.session.Current()) != draft {
+		t.Fatal("o discarded the draft before the question was answered")
+	}
+
+	// Confirming opens it, which is a read and produces a real revision —
+	// so the next write is a genuine, conflict-checked update.
+	step(t, m, "y")
 	if string(m.session.Current()) != existing {
 		t.Error("opening the existing policy did not load the server's content")
 	}
 	rev, exists, _ := m.session.RemoteRevision()
 	if !exists || rev.Version != 7 {
 		t.Errorf("after opening the taken policy, revision = %v (exists %v), want version 7", rev, exists)
+	}
+}
+
+// TestInspectingTheTakenPolicyCannotDestroyTheDraft is the regression for
+// the draft being lost on the create-collision path.
+//
+// Asking to open the policy that is already there used to replace the
+// session outright, discarding a draft that had never been written
+// anywhere — the create had just been refused, so the server did not have
+// it either. Declining must leave it exactly as it was.
+func TestInspectingTheTakenPolicyCannotDestroyTheDraft(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	const existing = "path \"secret/data/someone-elses\" {\n  capabilities = [\"read\"]\n}\n"
+	store.seed("team-a", existing, 7)
+
+	m := connectTestModel(t, store)
+	step(t, m, "n")
+	typeInto(t, m, "team-a")
+	step(t, m, "enter", "a", "enter")
+	typeInto(t, m, "secret/data/mine/*")
+	step(t, m, "enter", "ctrl+s", "s", "ctrl+s")
+
+	if m.dialog != dialogRemoteNameTaken {
+		t.Fatalf("expected the name-taken dialog, got %d (problem = %q)", m.dialog, m.problem)
+	}
+	draft := string(m.session.Current())
+	if draft == "" {
+		t.Fatal("the draft is empty; this test would prove nothing")
+	}
+
+	// Ask to open the existing policy, then decline.
+	step(t, m, "o")
+	if m.dialog != dialogRemoteDraftLoss {
+		t.Fatalf("o did not ask first (dialog = %d)", m.dialog)
+	}
+	step(t, m, "esc")
+
+	if string(m.session.Current()) != draft {
+		t.Errorf("declining to open the existing policy destroyed the draft:\nwant:\n%s\ngot:\n%s",
+			draft, m.session.Current())
+	}
+	if !m.session.Dirty() {
+		t.Error("declining cleared the draft's unsaved state")
+	}
+	if name, _ := m.session.RemoteName(); name != "team-a" {
+		t.Errorf("declining changed which policy is being edited (now %q)", name)
+	}
+	if _, exists, _ := m.session.RemoteRevision(); exists {
+		t.Error("declining marked the draft as existing on the server")
+	}
+	// And it is back at the question that led here, not dumped out of it.
+	if m.dialog != dialogRemoteNameTaken {
+		t.Errorf("declining left dialog = %d, want the name-taken question", m.dialog)
+	}
+
+	// Nothing was read from the server on the way through.
+	if got := countCalls(store, "read:team-a"); got != 0 {
+		t.Errorf("declining still read the policy %d time(s)", got)
+	}
+}
+
+// TestTheDraftLossQuestionIsSkippedWhenThereIsNoDraft keeps the
+// confirmation from becoming noise: an empty, unmodified document has
+// nothing to lose, so opening the existing policy goes straight through.
+func TestTheDraftLossQuestionIsSkippedWhenThereIsNoDraft(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	const existing = "path \"secret/data/someone-elses\" {\n  capabilities = [\"read\"]\n}\n"
+	store.seed("team-a", existing, 7)
+
+	m := connectTestModel(t, store)
+	m.takenName = "team-a"
+	m.dialog = dialogRemoteNameTaken
+
+	step(t, m, "o")
+
+	if m.dialog == dialogRemoteDraftLoss {
+		t.Fatal("an unmodified document was asked about a draft it does not have")
+	}
+	if string(m.session.Current()) != existing {
+		t.Error("the existing policy was not opened")
 	}
 }
 

@@ -206,6 +206,34 @@ func (b *policyBrowser) setNames(names []string) {
 	}
 }
 
+// add records a policy the server now has, keeping the listing sorted.
+//
+// It is how a create reaches the browser without a round trip: re-listing
+// would answer with a message that moves the screen and overwrites the
+// status line, which is the wrong price for keeping a list current that
+// `r` refreshes anyway.
+func (b *policyBrowser) add(name string) {
+	for _, existing := range b.names {
+		if existing == name {
+			return
+		}
+	}
+	b.names = sortedNames(append(b.names, name))
+}
+
+// remove drops a policy the server no longer has, keeping the selection on
+// something that still exists.
+func (b *policyBrowser) remove(name string) {
+	out := b.names[:0:0]
+	for _, existing := range b.names {
+		if existing != name {
+			out = append(out, existing)
+		}
+	}
+	b.names = out
+	b.clampSelection()
+}
+
 // visible is the listing after the filter.
 func (b *policyBrowser) visible() []string {
 	needle := strings.ToLower(strings.TrimSpace(b.filter.Value()))

@@ -85,6 +85,22 @@ func (f *fakeStore) callLog() []string {
 	return append([]string(nil), f.calls...)
 }
 
+// countCalls reports how many times an operation was attempted.
+//
+// A test that wants to prove something did *not* happen counts before and
+// after rather than scanning for the call's absence: the interesting
+// assertion is usually "no *further* attempt", and an operation that
+// legitimately happened once would defeat a bare absence check.
+func countCalls(f *fakeStore, op string) int {
+	n := 0
+	for _, call := range f.callLog() {
+		if call == op {
+			n++
+		}
+	}
+	return n
+}
+
 // enter records the call and honours the error hook and the gate. Every
 // operation starts here, so a cancelled context is respected everywhere
 // rather than only where a test happened to need it.

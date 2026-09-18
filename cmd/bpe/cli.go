@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/kevinpinscoe/bao-policy-editor/internal/apperr"
@@ -271,6 +272,11 @@ func parseArgs(args []string) (*Command, error) {
 		return nil, err
 	}
 
+	remote, err := boolFlag(values, "remote")
+	if err != nil {
+		return nil, err
+	}
+
 	cmd, err := parseRemaining(remaining, flagsFromValues(values))
 	if err != nil {
 		return nil, err
@@ -278,8 +284,34 @@ func parseArgs(args []string) (*Command, error) {
 	// Stamped centrally rather than at each construction site, so a
 	// command built on a path that forgot about --remote cannot silently
 	// lose it and start a local editor instead.
-	cmd.Remote = values["remote"] == "true"
+	cmd.Remote = remote
 	return cmd, nil
+}
+
+// boolFlag reads a boolean flag scanned by scanFlags, rejecting a value it
+// cannot parse rather than treating it as false.
+//
+// Comparing against the literal "true" would be the obvious thing and is
+// wrong twice over: --remote=1 and --remote=T are valid boolean forms that
+// would silently become false, and --remote=garbage would silently become
+// false as well — in both cases starting a local editor for someone who
+// asked for a remote one. The accepted forms are strconv.ParseBool's,
+// which are the standard library flag package's, which is what a reader
+// will expect. This mirrors how --skip-verify is handled in
+// internal/config.
+func boolFlag(values map[string]string, name string) (bool, error) {
+	raw, ok := values[name]
+	if !ok {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, apperr.Usagef(
+			"invalid boolean value for --%s: %q (want one of: 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False)",
+			name, raw,
+		)
+	}
+	return parsed, nil
 }
 
 func parseRemaining(remaining []string, cfgFlags config.Flags) (*Command, error) {

@@ -451,9 +451,11 @@ unsaved edit exactly as they were.
 | --- | --- |
 | Create or update | The review screen: a diff of what will be sent, confirmed with `ctrl+s`. Nothing is sent before that. |
 | Update whose version is stale | Refused by the server, then the conflict flow below. Never an overwrite. |
+| Retrying after a stale update | `ctrl+s` from the conflict review itself, with that screen's own re-read. Backing out and saving normally is refused again. |
 | Create whose name is taken | Refused and kept as a create conflict. BPE will not convert it into an update. |
 | Delete | The policy's exact name, typed out. |
 | Discarding your edits for the server's copy | A second confirmation, separate from the conflict question. |
+| Discarding a refused draft to open the policy that blocked it | A second confirmation, which names what is lost. |
 
 **Unattended remote writes are deliberately absent.** There is no
 non-interactive form of any of the above, and no flag to skip a
@@ -525,6 +527,18 @@ A create refused because the name is taken is a different question, and
 gets a different answer: BPE offers to *open* the existing policy. That is
 a read, which produces a real revision, so any write after it is a genuine
 conflict-checked update. The refused create is never retried as one.
+
+Opening it **asks first**, because the create was refused and so the draft
+you wrote exists nowhere — not on the server, not on disk — and opening
+the server's copy replaces it. Declining leaves the draft exactly as it
+was, and reads nothing. Save it under a different name to keep it.
+
+**Looking at the server's version is not a licence to overwrite it.** The
+revision a conflict re-read reports is used only by `ctrl+s` on that same
+review screen. Leaving the review discards it, so an ordinary save
+afterwards carries the version BPE originally read and is refused again —
+which is the right answer for a user who backed out rather than
+confirming.
 
 One detail is undocumented upstream: OpenBao's API reference states
 neither the HTTP status code nor the error body for a failed

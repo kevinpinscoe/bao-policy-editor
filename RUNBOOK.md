@@ -368,7 +368,7 @@ editor does the same thing without restarting.
 | To | Press | And expect |
 | --- | --- | --- |
 | Open a policy | `↑`/`↓`, `enter` | The ordinary editor, with `remote · <address>` in the header |
-| Save a change | `s`, then `ctrl+s` | A diff first; nothing is sent until `ctrl+s` |
+| Save a change | `s`, then `ctrl+s` | A diff first; nothing is sent until `ctrl+s`. A success leaves you in the editor, with the confirmation on the status line |
 | Create a policy | `n`, name it, edit, `s`, `ctrl+s` | A create; a name already taken is refused, not converted to an update |
 | Delete a policy | `x`, type the exact name, `enter` | Refusal on any other input |
 | Abandon a slow request | `esc` | The request cancelled and nothing applied when it later returns |
@@ -424,6 +424,19 @@ question with a different answer — BPE offers to open the existing policy.
 Opening is a read, which produces a real revision, so the write after it
 is a genuine conflict-checked update. The refused create is never retried
 as one.
+
+Opening it asks a second time first. The create was refused, so the draft
+is not on the server, and it was never on disk either — opening the
+server's copy replaces the only copy of it that exists. Decline, and the
+draft is untouched and nothing is read; save it under another name to keep
+it.
+
+**Backing out of the conflict review does not leave a licence behind.**
+The revision that review's re-read reported is used only by `ctrl+s` on
+that screen. Press Escape instead and it is discarded, so the next
+ordinary save carries the original version and the server refuses it
+again. If you meant to overwrite, go back through `s` → `ctrl+s` → `v` →
+`ctrl+s`.
 
 ---
 

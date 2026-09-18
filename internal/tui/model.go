@@ -52,6 +52,7 @@ const (
 	dialogRemoteDiscard
 	dialogRemoteDelete
 	dialogRemoteNameTaken
+	dialogRemoteDraftLoss
 )
 
 // reviewKind says what the review screen is currently showing, which
@@ -154,6 +155,20 @@ type Model struct {
 
 	// takenName is the policy name a create was refused for.
 	takenName string
+
+	// pendingRevision is the revision a re-read of the server reported
+	// while showing the conflict diff.
+	//
+	// It is held here rather than adopted onto the session, and it is
+	// consumed only by ctrl+s on the reviewServerConflict screen. Writing
+	// it onto the session at the moment the diff was *displayed* would
+	// mean that viewing the server's version, pressing Escape, and later
+	// doing an ordinary save would send that newer revision — an overwrite
+	// the user never confirmed from the conflict review, arrived at by
+	// looking. Leaving that review clears this, so the next ordinary save
+	// carries the stale revision again and the server refuses it again,
+	// which is the correct answer.
+	pendingRevision *baoclient.Revision
 
 	// busy and busyLabel report an in-flight remote operation; op,
 	// lastOp and opCancel identify and cancel it. See remote.go.
@@ -608,8 +623,8 @@ func (m *Model) handleParamsKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m *Model) handleScrollKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "esc", "q":
+		m.leaveReview()
 		m.screen = screenEditor
-		m.reviewKind = reviewSave
 		return m, nil
 	case "ctrl+c":
 		return m.requestQuit()
@@ -620,11 +635,7 @@ func (m *Model) handleScrollKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case m.reviewKind == reviewSave:
 			return m, m.save()
 		case m.reviewKind == reviewServerConflict:
-			// The server's version has been on screen; this is the
-			// explicit, reviewed retry with the revision that fetch
-			// reported. It is never reached without that diff first.
-			m.reviewKind = reviewSave
-			return m, m.writePolicy()
+			return m, m.retryAfterConflictReview()
 		}
 	}
 
@@ -714,10 +725,29 @@ func (m *Model) handleDialogKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case dialogRemoteNameTaken:
 		switch answer {
 		case "o":
+			// Opening the server's copy replaces the document, which for a
+			// refused create means throwing away the draft that was just
+			// written. That is a second, separate loss from the one the
+			// name-taken question is about, so it gets its own question —
+			// unless there is nothing to lose.
+			if m.session.Dirty() {
+				m.dialog = dialogRemoteDraftLoss
+				return m, nil
+			}
 			m.dialog = dialogNone
 			return m, m.openTakenPolicy()
 		case "esc", "c", "n":
 			m.dialog = dialogNone
+		}
+
+	case dialogRemoteDraftLoss:
+		switch answer {
+		case "y":
+			m.dialog = dialogNone
+			return m, m.openTakenPolicy()
+		case "esc", "n", "c":
+			// Back to the question that led here, with the draft intact.
+			m.dialog = dialogRemoteNameTaken
 		}
 
 	case dialogRemoteDelete:
@@ -856,6 +886,42 @@ func (m *Model) showHelp() {
 	m.viewport.GotoTop()
 }
 
+// leaveReview resets the review screen's state, including the revision a
+// conflict review was holding.
+//
+// Clearing that revision is the point. It is only ever a licence to write,
+// granted by having the server's version on screen, and it expires when
+// that screen is left — so backing out of a conflict review and saving
+// normally afterwards sends the stale revision and is refused again,
+// rather than quietly completing the overwrite the user declined to
+// confirm.
+func (m *Model) leaveReview() {
+	m.reviewKind = reviewSave
+	m.pendingRevision = nil
+}
+
+// retryAfterConflictReview writes the user's version over the server's,
+// using the revision the conflict review's own re-read reported.
+//
+// It is reachable only from that review screen, and only while the
+// revision it fetched is still held — which together are what make this
+// the reviewed, confirmed overwrite rather than an incidental one.
+func (m *Model) retryAfterConflictReview() tea.Cmd {
+	if m.pendingRevision == nil {
+		// Nothing fetched, or the review was already left and re-entered
+		// some other way. Refusing is right: without a re-read there is
+		// nothing newer to write against.
+		m.problem = "re-read the policy before retrying — press esc, save again, and choose to see what is on the server"
+		return nil
+	}
+	if err := m.session.AdoptRemoteRevision(*m.pendingRevision); err != nil {
+		m.problem = err.Error()
+		return nil
+	}
+	m.leaveReview()
+	return m.writePolicy()
+}
+
 // showReview builds the save review: what is about to be written, against
 // what was read.
 func (m *Model) showReview() {
@@ -863,7 +929,7 @@ func (m *Model) showReview() {
 		m.status = "nothing to save — the document matches " + m.unchangedAgainst()
 		return
 	}
-	m.reviewKind = reviewSave
+	m.leaveReview()
 	m.review = Diff(m.session.Original(), m.session.Current())
 	m.screen = screenReview
 	m.viewport.SetContent(m.renderDiff(m.review))
@@ -886,6 +952,7 @@ func (m *Model) showConflictDiff() {
 		m.problem = err.Error()
 		return
 	}
+	m.leaveReview()
 	m.reviewKind = reviewDiskConflict
 	m.review = Diff(disk, m.session.Current())
 	m.screen = screenReview
@@ -1034,8 +1101,8 @@ func (m *Model) adoptSession(session *Session) {
 	m.session = session
 	m.selected = 0
 	m.review = nil
-	m.reviewKind = reviewSave
 	m.problem = ""
+	m.leaveReview()
 }
 
 func (m *Model) handleConnected(msg remoteConnectedMsg) (tea.Model, tea.Cmd) {
@@ -1098,17 +1165,17 @@ func (m *Model) handleServerCopy(msg remoteServerCopyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selected = min(m.selected, max(0, m.session.Document().RuleCount()-1))
+		m.leaveReview()
 		m.screen = screenEditor
 		m.status = "reloaded " + msg.policy.Name + " from the server — your unsaved edits were discarded"
 		return m, nil
 	}
 
-	// Looking, not taking: the edits stay exactly as they are and only the
-	// revision a later write would send moves forward.
-	if err := m.session.AdoptRemoteRevision(msg.policy.Revision); err != nil {
-		m.problem = err.Error()
-		return m, nil
-	}
+	// Looking, not taking. The session is not touched at all — not its
+	// bytes and not its revision. The revision this read reported is held
+	// aside, and only ctrl+s from the screen below will use it.
+	rev := msg.policy.Revision
+	m.pendingRevision = &rev
 	m.reviewKind = reviewServerConflict
 	m.review = Diff([]byte(msg.policy.Body), m.session.Current())
 	m.screen = screenReview
@@ -1142,8 +1209,17 @@ func (m *Model) handleWrote(msg remoteWroteMsg) (tea.Model, tea.Cmd) {
 		m.problem = strings.Join(msg.result.Warnings, "; ")
 	}
 
-	if m.browse != nil && m.store != nil {
-		return m, m.refreshPolicies(m.store)
+	// A create adds a name the browser has not seen; it is added to the
+	// listing in place rather than by re-listing the server.
+	//
+	// Re-listing would work, but its reply moves to the browser and
+	// replaces the status line with a policy count — so the screen the
+	// user is on and the confirmation they just earned would both be
+	// thrown away by a refresh they never asked for. The listing is
+	// brought up to date by `r`, and by opening the browser, which is
+	// where a stale one would actually matter.
+	if msg.created && m.browse != nil {
+		m.browse.add(name)
 	}
 	return m, nil
 }
@@ -1164,8 +1240,11 @@ func (m *Model) handleDeleted(msg remoteDeletedMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.store != nil {
-		return m, m.refreshPolicies(m.store)
+	// Removed in place, for the same reason a create is added in place:
+	// the status line here is the confirmation that the delete happened,
+	// and a refresh would overwrite it with a count.
+	if m.browse != nil {
+		m.browse.remove(msg.name)
 	}
 	return m, nil
 }

@@ -430,6 +430,22 @@ func (m *Model) renderDialog() (string, []hint) {
 			{Key: "esc", Label: "back"},
 		}
 
+	case dialogRemoteDraftLoss:
+		added, removed := CountChanges(Diff(m.session.Original(), m.session.Current()))
+		title = "Opening " + m.takenName + " will discard your draft"
+		body = []string{
+			fmt.Sprintf("You have %d %s added and %d removed that have never been written anywhere — "+
+				"the create was refused, so none of it reached the server.",
+				added, pluralize("line", added), removed),
+			"Opening the policy that is already there replaces this document with the server's version. " +
+				"Your draft is not saved first and cannot be recovered afterwards.",
+			"To keep it, go back and save it under a different name instead.",
+		}
+		choices = []hint{
+			{Key: "y", Label: "discard my draft and open " + m.takenName},
+			{Key: "esc", Label: "no, keep my draft"},
+		}
+
 	case dialogRemoteDelete:
 		title = "Delete " + m.deleteTarget + " from the server?"
 		body = []string{
