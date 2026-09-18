@@ -1308,7 +1308,8 @@ func (m *Model) handleRemoteErr(msg remoteErrMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.problem = msg.during + ": " + msg.err.Error()
+	// The error already names the operation; see remoteErrMsg.
+	m.problem = msg.err.Error()
 
 	// A failure while connecting leaves nothing connected, so the connect
 	// screen is where the user can do something about it. A failure once

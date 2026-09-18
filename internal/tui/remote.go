@@ -107,14 +107,22 @@ type (
 		name string
 	}
 
-	// remoteErrMsg is any failure. during names the operation for the
-	// message, and created says whether the failed write was a create —
-	// which is what keeps a create conflict from being reported, or
-	// retried, as an update.
+	// remoteErrMsg is any failure.
+	//
+	// It carries no operation label of its own. internal/baoclient already
+	// names the operation in the error it returns ("updating policy X
+	// failed: ..."), and adding a second label here produced "updating
+	// policy X: updating policy X failed: ..." on screen. The rule is that
+	// the operation appears exactly once, and the layer that knows which
+	// request was made is the one that says so. Kevin's instruction,
+	// 2026-09-18.
+	//
+	// created says whether the failed write was a create, which is what
+	// keeps a create conflict from being reported, or retried, as an
+	// update.
 	remoteErrMsg struct {
 		op      remoteOpID
 		err     error
-		during  string
 		created bool
 	}
 )
@@ -182,11 +190,13 @@ func (m *Model) connectRemote(cfg config.Config) tea.Cmd {
 	return func() tea.Msg {
 		store, err := factory(cfg)
 		if err != nil {
-			return remoteErrMsg{op: op, err: err, during: "connecting to OpenBao"}
+			// baoclient.New's own errors already say what could not be
+			// built ("the OpenBao client could not be created: ...").
+			return remoteErrMsg{op: op, err: err}
 		}
 		list, err := store.List(ctx)
 		if err != nil {
-			return remoteErrMsg{op: op, err: err, during: "listing policies"}
+			return remoteErrMsg{op: op, err: err}
 		}
 		return remoteConnectedMsg{op: op, store: store, names: sortedNames(list.Names)}
 	}
@@ -199,7 +209,7 @@ func (m *Model) refreshPolicies(store RemoteStore) tea.Cmd {
 	return func() tea.Msg {
 		list, err := store.List(ctx)
 		if err != nil {
-			return remoteErrMsg{op: op, err: err, during: "listing policies"}
+			return remoteErrMsg{op: op, err: err}
 		}
 		return remoteListedMsg{op: op, names: sortedNames(list.Names)}
 	}
@@ -213,7 +223,7 @@ func (m *Model) openPolicy(store RemoteStore, name string) tea.Cmd {
 	return func() tea.Msg {
 		policy, err := store.Read(ctx, name)
 		if err != nil {
-			return remoteErrMsg{op: op, err: err, during: "reading policy " + name}
+			return remoteErrMsg{op: op, err: err}
 		}
 		return remoteOpenedMsg{op: op, policy: policy}
 	}
@@ -236,7 +246,7 @@ func (m *Model) fetchServerCopy(store RemoteStore, name string, discard bool) te
 	return func() tea.Msg {
 		policy, err := store.Read(ctx, name)
 		if err != nil {
-			return remoteErrMsg{op: op, err: err, during: "reading policy " + name}
+			return remoteErrMsg{op: op, err: err}
 		}
 		return remoteServerCopyMsg{op: op, policy: policy, discard: discard}
 	}
@@ -296,14 +306,14 @@ func (m *Model) writePolicyWith(override *baoclient.Revision) tea.Cmd {
 		if !exists {
 			result, err := store.Create(ctx, name, body)
 			if err != nil {
-				return remoteErrMsg{op: op, err: err, during: "creating policy " + name, created: true}
+				return remoteErrMsg{op: op, err: err, created: true}
 			}
 			return remoteWroteMsg{op: op, result: result, created: true}
 		}
 
 		result, err := store.Update(ctx, name, body, rev)
 		if err != nil {
-			return remoteErrMsg{op: op, err: err, during: "updating policy " + name}
+			return remoteErrMsg{op: op, err: err}
 		}
 		return remoteWroteMsg{op: op, result: result}
 	}
@@ -318,7 +328,7 @@ func (m *Model) deletePolicy(store RemoteStore, name string) tea.Cmd {
 
 	return func() tea.Msg {
 		if err := store.Delete(ctx, name); err != nil {
-			return remoteErrMsg{op: op, err: err, during: "deleting policy " + name}
+			return remoteErrMsg{op: op, err: err}
 		}
 		return remoteDeletedMsg{op: op, name: name}
 	}

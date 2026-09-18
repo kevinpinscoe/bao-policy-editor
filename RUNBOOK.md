@@ -326,7 +326,12 @@ answer a question someone will eventually ask:
 
 | Test | Answers |
 | --- | --- |
-| `TestUpdateSendsPatchCarryingThePreviouslyReadVersion` | Is an update really conflict-safe, and does it really use PATCH? |
+| `TestUpdateSendsPostCarryingThePreviouslyReadVersion` | Is an update really conflict-safe, and does it use POST rather than the PATCH this endpoint does not implement? |
+| `TestUpdatePreservesTheMetadataTheReadReported` | Does an update put back the `expiration` and `cas_required` a POST would otherwise clear? |
+| `TestUpdateDistinguishesAbsentFromFalse` | Is "the server did not report this" kept apart from "the server reported false"? |
+| `TestUpdateNeverSendsTtl` | Could repeated edits push a policy's expiry further out each time? |
+| `TestAWriteWithNoVersionInItsResponseIsReadBack` | After a `204` with no body, does the session still have conflict protection for the next save? |
+| `TestErrorsNameTheOperationExactlyOnce` | Does a failure read as "updating policy X: updating policy X failed"? |
 | `TestUpdateSendsOnlyThePolicyAndCas` | Could an update quietly clear a policy's `expiration` or `ttl`? |
 | `TestUpdateRefusesWithoutVersionMetadata` | What happens against a server that reports no version? |
 | `TestStaleCasMapsToConflictAndExitCodeFour` | Is a rejected check-and-set recognized across the shapes it might arrive in? |
@@ -377,6 +382,32 @@ editor does the same thing without restarting.
 and namespace as editable fields and the token only as `configured` or
 `not configured`. If it says `not configured`, the fix is in the
 environment, not on that screen.
+
+**Verified against a live server**, 2026-09-18, on a disposable in-memory
+OpenBao 2.5.2 bound to loopback, with disposable policies:
+
+| Case | Result |
+| --- | --- |
+| Ordinary policy, edit and save | version advanced, body changed |
+| Policy with an explicit `expiration` | `expiration` unchanged |
+| Policy whose expiration came from `ttl` | same instant preserved; see the note below |
+| Policy with `cas_required = true` | setting unchanged |
+| Stale write provoked by a second client | presented as a conflict, not a generic failure; the refused write never reached the server |
+| The server's version reviewed, then retried | the retry succeeded and replaced it |
+
+The disposable policies were deleted afterwards and no credential reached
+any file. To repeat it, run a `bao server -dev` on a loopback port, point
+`BAO_ADDR` and `BAO_TOKEN` at it, and work through the table above by hand
+— the interface is the thing under test, so there is no scripted form of
+it in the repository.
+
+**One thing that looks like a bug and is not.** A policy whose expiration
+came from a `ttl` reads back in the server's local offset until its first
+update, and in UTC afterwards — `…T16:29:20.691566319-04:00` becomes
+`…T20:29:20.691566319Z`. That is the same instant to the nanosecond. BPE
+sends the string exactly as the server gave it; the server normalizes it
+on write, and it is byte-stable from then on. Confirmed by echoing the
+same value with plain `curl`, which produces the identical change.
 
 **Without a server to hand**, every one of these workflows is exercised
 against an in-memory fake by the test suite, which is the faster way to
@@ -499,5 +530,6 @@ wire traffic is visible without a real credential anywhere near it.
 ## Maintenance Notes
 
 - **Last game-day test:** 2026-09-17 — build, `--help`/`--version`, a usage error, the interactive editor opened on a policy with comments and an unknown attribute (opened, previewed, diagnosed, rule added, rule duplicated, rule removed with its comments, saved, and the file confirmed to still carry every comment and unknown attribute), the editor started empty and saved to a new path, the editor refusing to replace an existing file, `NO_COLOR=1` confirmed to emit no colour-setting escape sequences, the editor rendered on a pty at 60, 100 and 120 columns, `bpe validate` against a clean policy, a policy with only warnings, a policy with a semantic error, a policy with a syntax error, and a missing file, `bpe format` reformatting a misindented policy, `--check` reporting both "not formatted" and "already formatted" without writing, formatting refusing a genuine syntax error while still formatting a policy with a decode-time error (bad `expiration`) unchanged in meaning, `bpe test` against an allowed request, a denied (default-deny) request, a request whose winning rule carries parameter constraints (`INCOMPLETE`, exit `3`), an unknown-capability usage error, a broader-deny-does-not-override-a-more-specific-allow regression, and a missing file, and Ctrl+C/SIGTERM interruption, all manually exercised against the built binary (FSM-14 added `format`; FSM-13 added `test`; FSM-12 covered everything but those two).
-- **Next scheduled review:** the first time BPE is pointed at a live OpenBao server, to confirm the two wire-level assumptions below against a real instance.
-- **Known drift risks:** remote operations are reachable now (Steps 11-13), but two things about the client remain unproven against a live server and stay that way until one is available: the exact wire form of a failed check-and-set (OpenBao documents neither the status code nor the error body), and whether the endpoint's PATCH accepts the `application/merge-patch+json` content type the official client sends, which its API reference does not state either. Both are isolated to one constant and one matcher, and both are noted in the code at the point they matter. Until a live instance has been used, treat Steps 11-13's remote procedures as verified against the in-memory fake and the httptest suite rather than against real infrastructure — the editor's side of every one of them is tested, but the server's exact responses are not yet observed. The editor's own limits are documented in README.md: a field whose value is not a plain literal is read-only rather than rewritten, the effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, and a duplicated rule is appended at the end of the file rather than inserted after the original. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.
+- **Last live smoke test:** 2026-09-18 against a disposable in-memory OpenBao 2.5.2 on loopback — RUNBOOK Step 11. Covered an ordinary policy, one with an explicit `expiration`, one whose expiration came from a `ttl`, and one with `cas_required = true`; each updated through the real TUI with the body changing, the version advancing and the metadata intact. A stale write was provoked with a second client and presented as a conflict rather than a generic failure, the server's version was reviewed, and the deliberate retry succeeded. Every disposable policy was deleted afterwards and no credential reached any file.
+- **Next scheduled review:** when BPE is first used against an OpenBao older or newer than 2.5.x, since the update path's compatibility is the thing that has been version-specific before.
+- **Known drift risks:** the two wire-level assumptions that used to sit here are resolved, and resolved differently from each other. The failed check-and-set is `400` carrying `check-and-set parameter did not match the current version`, which BPE's matcher recognizes — that one held. The other did not: `sys/policies/acl` does **not** implement PATCH on 2.5.x, answering `405 unsupported operation`, so BPE now updates with a POST that echoes the policy's writable metadata back (see README.md's [Remote policies](README.md#remote-policies)). The remaining version risk is the mirror image: newer OpenBao releases document PATCH here, and if a future release were ever to *stop* accepting the POST form, the update path would need revisiting. POST is the older and more widely accepted of the two, which is why it is the one BPE uses. The editor's own limits are documented in README.md: a field whose value is not a plain literal is read-only rather than rewritten, the effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, and a duplicated rule is appended at the end of the file rather than inserted after the original. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.

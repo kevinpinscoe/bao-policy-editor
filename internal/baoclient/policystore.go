@@ -18,15 +18,128 @@ import (
 // aclPolicyPath is the API path for the ACL policy endpoints.
 const aclPolicyPath = "sys/policies/acl"
 
-// mergePatchContentType is what a PATCH to a logical endpoint is sent as.
+// Updates are POST, not PATCH.
 //
-// OpenBao's API documentation for sys/policies/acl documents PATCH's
-// parameters but shows no PATCH example and states no Content-Type
-// requirement (checked 2026-09-17). This is the content type the official
-// Go client's own PATCH path (Logical.JSONMergePatch) sets, so it is the
-// least-invented choice available; it is named here rather than inlined so
-// there is one place to change if a live server disagrees.
-const mergePatchContentType = "application/merge-patch+json"
+// BPE sent PATCH until 2026-09-18, on the strength of OpenBao's API
+// documentation listing PATCH's parameters for this endpoint. Measured
+// against a live OpenBao 2.5.2, sys/policies/acl/:name does not implement
+// it: the request comes back 405 "unsupported operation", so every remote
+// update failed. The content type was never the problem — the server names
+// application/merge-patch+json itself and answers 415 for anything else,
+// and PATCH works on kv v2 on the same server, so this is one endpoint
+// declining a verb rather than a server lacking it.
+//
+// Newer OpenBao releases document PATCH here. BPE uses the POST form
+// regardless, because it is accepted by both and nothing is gained by
+// discovering support at runtime: a fallback would mean sending a request
+// expected to fail, on a path where the failure of a *write* is exactly
+// what must not be guessed at. Kevin's instruction, 2026-09-18.
+//
+// The cost is that POST resets what it is not sent — see Metadata.
+
+// Metadata is the writable policy fields BPE does not model, as the server
+// reported them on a read.
+//
+// It exists because an update is a POST, and POST resets every field it is
+// not sent. Measured against OpenBao 2.5.2 on 2026-09-18: a POST carrying
+// only `policy` and `cas` cleared a policy's `expiration` — whether set
+// directly or derived from a `ttl` — and cleared `cas_required`. Echoing
+// each field back on the same POST preserved it while still updating the
+// body, which is what BPE does.
+//
+// # Presence is not the same as a false value
+//
+// Every field is a pointer so that "the server did not report this" and
+// "the server reported false" stay distinguishable. Collapsing them would
+// make the two indistinguishable in exactly the direction that loses data:
+// a policy with cas_required unset and one with it explicitly false would
+// both round-trip as false, and, worse, a field this version of OpenBao
+// does not report at all would be sent as a zero value and thereby set.
+//
+// Only fields the server actually reported are sent. Nothing here is
+// invented, defaulted, or carried across from another policy.
+type Metadata struct {
+	// Expiration is the policy's absolute expiry, exactly as the server
+	// rendered it. It is kept as the server's own string rather than
+	// parsed and reformatted, because reformatting a timestamp BPE does
+	// not otherwise interpret can only lose precision or shift a zone.
+	Expiration *string
+
+	// CASRequired is the policy's own cas_required setting.
+	//
+	// Until 2026-09-18 BPE read this and deliberately never sent it, so as
+	// not to turn the requirement on for other clients of the same policy.
+	// That reasoning still holds for *enabling* it — and echoing back the
+	// value the server just reported does not enable anything. Omitting it
+	// from a POST is what changes the setting, by clearing it. Kevin's
+	// instruction, 2026-09-18.
+	CASRequired *bool
+
+	// AllowWildcardsInIdentityTemplates and
+	// AllowSlashesInIdentityTemplates are the identity-template flags,
+	// carried on the same terms: preserved when the server reports them,
+	// absent otherwise.
+	AllowWildcardsInIdentityTemplates *bool
+	AllowSlashesInIdentityTemplates   *bool
+}
+
+// writableFields is the response fields Metadata round-trips, and the only
+// ones an update sends besides `policy` and `cas`.
+//
+// The rest of a read's response is envelope — `name`, `version`,
+// `modified`, `warnings` — describing the policy rather than configuring
+// it, and sending any of it back would at best be ignored and at worst
+// rejected.
+//
+// `ttl` is deliberately absent. The server stores it as an absolute
+// `expiration`, so replaying the original relative value on every update
+// would push the expiry further out each time a policy was edited — a
+// policy meant to lapse would quietly become permanent. The absolute
+// expiration is preserved instead. Kevin's instruction, 2026-09-18.
+var writableFields = []string{
+	"expiration",
+	"cas_required",
+	"allow_wildcards_in_identity_templates",
+	"allow_slashes_in_identity_templates",
+}
+
+// metadataFrom reads the writable fields a response actually carried.
+func metadataFrom(data map[string]any) Metadata {
+	var m Metadata
+	if data == nil {
+		return m
+	}
+	if v, ok := data["expiration"].(string); ok {
+		m.Expiration = &v
+	}
+	if v, ok := data["cas_required"].(bool); ok {
+		m.CASRequired = &v
+	}
+	if v, ok := data["allow_wildcards_in_identity_templates"].(bool); ok {
+		m.AllowWildcardsInIdentityTemplates = &v
+	}
+	if v, ok := data["allow_slashes_in_identity_templates"].(bool); ok {
+		m.AllowSlashesInIdentityTemplates = &v
+	}
+	return m
+}
+
+// applyTo adds each reported field to an update's request body, leaving
+// out the ones the server never mentioned.
+func (m Metadata) applyTo(body map[string]any) {
+	if m.Expiration != nil {
+		body["expiration"] = *m.Expiration
+	}
+	if m.CASRequired != nil {
+		body["cas_required"] = *m.CASRequired
+	}
+	if m.AllowWildcardsInIdentityTemplates != nil {
+		body["allow_wildcards_in_identity_templates"] = *m.AllowWildcardsInIdentityTemplates
+	}
+	if m.AllowSlashesInIdentityTemplates != nil {
+		body["allow_slashes_in_identity_templates"] = *m.AllowSlashesInIdentityTemplates
+	}
+}
 
 // Revision is the server-side state of a policy at the moment it was read.
 //
@@ -48,12 +161,9 @@ type Revision struct {
 	// Modified is when the server last changed the policy, if it said.
 	Modified time.Time
 
-	// CASRequired is the policy's own cas_required setting, as the server
-	// reported it. BPE reads this and passes it back untouched; it never
-	// turns it on for a policy that did not already have it, because that
-	// would change the server-side rules for every other client of that
-	// policy on BPE's say-so. Kevin's instruction, 2026-09-17.
-	CASRequired bool
+	// Metadata is the writable policy state the server reported, carried so
+	// an update can put it back. See Metadata.
+	Metadata Metadata
 
 	// ContentHash is a SHA-256 of the policy body as read, hex-encoded.
 	//
@@ -197,32 +307,76 @@ func (c *Client) Read(ctx context.Context, name string) (Policy, error) {
 // against a policy of the same name appearing between a caller listing the
 // policies and deciding the name was free.
 func (c *Client) Create(ctx context.Context, name, body string) (WriteResult, error) {
-	return c.write(ctx, http.MethodPost, name, map[string]any{
+	result, err := c.write(ctx, http.MethodPost, name, map[string]any{
 		"policy": body,
 		"cas":    -1,
 	}, "creating policy "+name)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	return c.revisionAfterWrite(ctx, name, result), nil
 }
 
-// Update writes an existing policy, sending the version from rev as the
-// check-and-set value.
+// Update writes an existing policy with POST, sending the version from rev
+// as the check-and-set value and putting back the writable metadata that
+// read reported.
 //
-// PATCH rather than POST: OpenBao documents POST as resetting unspecified
-// fields to their defaults and PATCH as preserving them. A policy may
-// carry an expiration, a ttl, cas_required, or the identity-template
-// flags, none of which BPE models — sending POST with only `policy` would
-// silently clear them. Kevin's instruction, 2026-09-17.
+// POST is the verb because it is the one this endpoint implements; see the
+// comment at the top of this file. Its cost is that it resets what it is
+// not sent, which is why rev.Metadata comes along: those fields were read
+// from the server moments ago and are handed straight back, unexamined and
+// unmodified.
 //
-// cas_required is deliberately not sent. It is the server's own per-policy
-// setting; BPE supplies `cas` for its own writes but does not turn the
-// requirement on for other clients of the same policy.
+// Nothing is invented. A field the server did not report is not sent, so
+// an OpenBao that knows nothing of the identity-template flags is never
+// told about them, and a policy with no expiration does not acquire one.
 func (c *Client) Update(ctx context.Context, name, body string, rev Revision) (WriteResult, error) {
 	if !rev.HasVersion {
 		return WriteResult{}, c.unsupportedConflictProtection(name)
 	}
-	return c.write(ctx, http.MethodPatch, name, map[string]any{
+
+	payload := map[string]any{
 		"policy": body,
 		"cas":    rev.Version,
-	}, "updating policy "+name)
+	}
+	rev.Metadata.applyTo(payload)
+
+	result, err := c.write(ctx, http.MethodPost, name, payload, "updating policy "+name)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	return c.revisionAfterWrite(ctx, name, result), nil
+}
+
+// revisionAfterWrite fills in the version and metadata a write did not
+// report, by reading the policy back.
+//
+// It is needed because this endpoint answers a successful write with
+// 204 and no body — measured against OpenBao 2.5.2 — so the write itself
+// says nothing about the version it produced. Without this, every second
+// update in a session would be refused for lack of conflict protection,
+// and the metadata carried into the next update would be empty, which is
+// how a POST silently clears it.
+//
+// This is a read-after-write for state, not a conflict check, so the gap
+// between the two carries no risk: if someone else writes in that gap, the
+// version read back is theirs, and the *next* update's check-and-set is
+// what catches it — which is exactly what a check-and-set is for.
+//
+// A failed re-read is not a failed write. The policy has already changed
+// on the server, so the write's success is returned as it stands; the
+// caller sees a revision with no version and is told to re-open the policy
+// before updating it again.
+func (c *Client) revisionAfterWrite(ctx context.Context, name string, result WriteResult) WriteResult {
+	if result.Revision.HasVersion {
+		return result
+	}
+	policy, err := c.Read(ctx, name)
+	if err != nil {
+		return result
+	}
+	result.Revision = policy.Revision
+	return result
 }
 
 // Delete removes a policy. See PolicyStore.Delete on why there is no
@@ -234,20 +388,15 @@ func (c *Client) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-// write issues a POST or PATCH to a policy path and parses whatever came
-// back.
+// write issues a POST to a policy path and parses whatever came back.
 //
 // It builds the request through the client rather than Logical's own
 // helpers so the HTTP method is explicit: Logical.Write sends PUT, and
-// while OpenBao accepts PUT and POST alike for a logical write, the
-// create/update distinction here rests on the documented POST and PATCH
-// semantics, and a reader should be able to see which one is on the wire
-// without going through a second package to find out.
+// while OpenBao accepts PUT and POST alike for a logical write, a reader
+// should be able to see what is on the wire without going through a second
+// package to find out.
 func (c *Client) write(ctx context.Context, method, name string, body map[string]any, op string) (WriteResult, error) {
 	req := c.api.NewRequest(method, "/v1/"+policyPath(name))
-	if method == http.MethodPatch {
-		req.Headers.Set("Content-Type", mergePatchContentType)
-	}
 	if err := req.SetJSONBody(body); err != nil {
 		return WriteResult{}, c.fail(err, op)
 	}
@@ -302,9 +451,7 @@ func revisionFrom(data map[string]any, body string) Revision {
 		rev.Version = version
 		rev.HasVersion = true
 	}
-	if required, ok := data["cas_required"].(bool); ok {
-		rev.CASRequired = required
-	}
+	rev.Metadata = metadataFrom(data)
 	if modified, ok := data["modified"].(string); ok {
 		if parsed, err := time.Parse(time.RFC3339Nano, modified); err == nil {
 			rev.Modified = parsed

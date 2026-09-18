@@ -45,11 +45,21 @@ type fakeStore struct {
 	// calls records every operation attempted, in order, so a test can
 	// assert that something did *not* happen.
 	calls []string
+
+	// lastUpdateRevision is the revision the most recent update arrived
+	// with, so a test can check what the editor actually sent.
+	lastUpdateRevision baoclient.Revision
 }
 
 type fakePolicy struct {
 	body    string
 	version int
+
+	// metadata is the writable server-side state a read reports and an
+	// update is expected to hand back. The fake keeps it so a test can
+	// prove the editor carries it across an edit rather than dropping it
+	// somewhere between the read and the write.
+	metadata baoclient.Metadata
 }
 
 func newFakeStore(address string) *fakeStore {
@@ -68,6 +78,21 @@ func (f *fakeStore) seed(name, body string, version int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.policies[name] = fakePolicy{body: body, version: version}
+}
+
+// seedWithMetadata is seed for a policy that also carries writable
+// server-side state.
+func (f *fakeStore) seedWithMetadata(name, body string, version int, meta baoclient.Metadata) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policies[name] = fakePolicy{body: body, version: version, metadata: meta}
+}
+
+// metadataOf reports the metadata the fake currently holds for a policy.
+func (f *fakeStore) metadataOf(name string) baoclient.Metadata {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.policies[name].metadata
 }
 
 // bodyOf reports what the fake server currently holds, which is how a test
@@ -153,6 +178,7 @@ func (f *fakeStore) Read(ctx context.Context, name string) (baoclient.Policy, er
 		Revision: baoclient.Revision{
 			Version:    p.version,
 			HasVersion: true,
+			Metadata:   p.metadata,
 		},
 	}, nil
 }
@@ -192,10 +218,16 @@ func (f *fakeStore) Update(ctx context.Context, name, body string, rev baoclient
 		return baoclient.WriteResult{}, fmt.Errorf(
 			"%w: sent cas %d, current version is %d", baoclient.ErrConflict, rev.Version, p.version)
 	}
+	f.lastUpdateRevision = rev
+
+	// The real server resets what an update does not send, so the fake
+	// does too: the stored metadata becomes whatever this update carried.
+	// A caller that drops it loses it here exactly as it would in
+	// production.
 	next := p.version + 1
-	f.policies[name] = fakePolicy{body: body, version: next}
+	f.policies[name] = fakePolicy{body: body, version: next, metadata: rev.Metadata}
 	return baoclient.WriteResult{
-		Revision: baoclient.Revision{Version: next, HasVersion: true},
+		Revision: baoclient.Revision{Version: next, HasVersion: true, Metadata: rev.Metadata},
 	}, nil
 }
 
