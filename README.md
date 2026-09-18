@@ -526,6 +526,17 @@ refused** rather than attempted. BPE does not fall back to re-reading and
 comparing before writing: that sequence has a race between the compare and
 the write, so it would report an update as conflict-safe when it was not.
 
+**And if a server reports one of those writable fields in a shape BPE does
+not recognize, the update is refused too** — a numeric `expiration`, a
+`cas_required` arriving as the string `"true"`. The policy still reads and
+can be inspected; it is the write that stops, before any request leaves
+BPE, naming the field that blocked it. There is no third option: BPE can
+either send the field back as the server gave it or omit it, and on a POST
+omitting it clears the setting. Guessing at what the value meant would be
+writing a value the server never sent. A field the server reports as
+`null` is not this case — `null` says there is no value, so leaving it out
+changes nothing.
+
 **Deletion has no equivalent.** This endpoint offers no check-and-set for
 DELETE, so a delete cannot be made atomic against a concurrent change. BPE
 says so rather than implying a safety it cannot provide: the delete
@@ -589,6 +600,19 @@ Both error forms contain `check-and-set`, so both are recognized. The
 empty `204` is why a write is followed by a read: the response says
 nothing about the version it produced, and without reading it back the
 next update in the same session would have no version to send.
+
+**That read-back has to come back with what BPE wrote.** There is a gap
+between the write and the read, and another client can write in it — so
+the version the read reports is not necessarily the version of BPE's own
+text. Adopting it anyway would attach someone else's version to an
+unchanged local document, and the next save would then send that version,
+match, and overwrite their change without ever showing a conflict; the
+check-and-set cannot catch it, because by then the version being sent is
+the current one. So BPE compares the returned policy against what it just
+wrote, byte for byte. If they differ, the write is still reported as
+having succeeded — it did — but no version is adopted, and you are told
+the policy changed again and must re-open it. The next update is refused
+until you do.
 
 **An expiration may be re-rendered by the server.** A policy whose
 expiration came from a `ttl` reads back in the server's local offset until

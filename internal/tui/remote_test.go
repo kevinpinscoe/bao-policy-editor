@@ -1326,3 +1326,52 @@ func TestAFailedWriteNamesTheOperationOnce(t *testing.T) {
 		t.Error("the editor prefixed the error with the operation the error already named")
 	}
 }
+
+// TestAPolicyWithUnpreservableMetadataSaysSoOnOpen — a policy whose
+// server-side metadata BPE cannot put back cannot be saved, and the user
+// finds that out when they open it rather than after they have edited it.
+//
+// The refusal itself lives in internal/baoclient, which is where it is
+// tested; what this proves is that the editor surfaces the condition at
+// open time and still refuses the write.
+func TestAPolicyWithUnpreservableMetadataSaysSoOnOpen(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seedWithMetadata("team-a", remotePolicyBody, 4, baoclient.Metadata{
+		Unpreservable: []string{"cas_required"},
+	})
+
+	m := openRemotePolicy(t, store, "team-a")
+
+	if !strings.Contains(m.problem, "cas_required") {
+		t.Errorf("opening the policy did not name the field BPE cannot preserve: problem = %q", m.problem)
+	}
+
+	step(t, m, "d", "s", "ctrl+s")
+
+	if got, _ := store.bodyOf("team-a"); got != remotePolicyBody {
+		t.Error("the update reached the server although its metadata could not be preserved")
+	}
+	if !strings.Contains(m.problem, "cas_required") {
+		t.Errorf("the refused save did not name the field that blocked it: problem = %q", m.problem)
+	}
+}
+
+// TestBothOpenTimeWarningsAreShownTogether — a server can report neither a
+// version nor usable metadata, and each has its own consequence. Assigning
+// one message after the other would drop the first, which is the defect
+// already fixed once for the messages shown after a write.
+func TestBothOpenTimeWarningsAreShownTogether(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seedUnversioned("team-a", remotePolicyBody, baoclient.Metadata{
+		Unpreservable: []string{"expiration"},
+	})
+
+	m := openRemotePolicy(t, store, "team-a")
+
+	if !strings.Contains(m.problem, "did not report a version") {
+		t.Errorf("the missing version was not reported: problem = %q", m.problem)
+	}
+	if !strings.Contains(m.problem, "expiration") {
+		t.Errorf("the unpreservable field was not reported: problem = %q", m.problem)
+	}
+}

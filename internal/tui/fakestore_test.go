@@ -60,6 +60,11 @@ type fakePolicy struct {
 	// prove the editor carries it across an edit rather than dropping it
 	// somewhere between the read and the write.
 	metadata baoclient.Metadata
+
+	// noVersion makes a read report no version at all, the way a server
+	// without policy versioning does. Zero value is false, so an ordinary
+	// seeded policy is versioned.
+	noVersion bool
 }
 
 func newFakeStore(address string) *fakeStore {
@@ -86,6 +91,15 @@ func (f *fakeStore) seedWithMetadata(name, body string, version int, meta baocli
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.policies[name] = fakePolicy{body: body, version: version, metadata: meta}
+}
+
+// seedUnversioned is seed for a policy the server reports no version for —
+// the state that makes a conflict-safe update impossible in the first
+// place.
+func (f *fakeStore) seedUnversioned(name, body string, meta baoclient.Metadata) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policies[name] = fakePolicy{body: body, metadata: meta, noVersion: true}
 }
 
 // metadataOf reports the metadata the fake currently holds for a policy.
@@ -172,15 +186,11 @@ func (f *fakeStore) Read(ctx context.Context, name string) (baoclient.Policy, er
 	if !ok {
 		return baoclient.Policy{}, fmt.Errorf("%w: %s", baoclient.ErrPolicyNotFound, name)
 	}
-	return baoclient.Policy{
-		Name: name,
-		Body: p.body,
-		Revision: baoclient.Revision{
-			Version:    p.version,
-			HasVersion: true,
-			Metadata:   p.metadata,
-		},
-	}, nil
+	rev := baoclient.Revision{Version: p.version, HasVersion: true, Metadata: p.metadata}
+	if p.noVersion {
+		rev = baoclient.Revision{Metadata: p.metadata}
+	}
+	return baoclient.Policy{Name: name, Body: p.body, Revision: rev}, nil
 }
 
 func (f *fakeStore) Create(ctx context.Context, name, body string) (baoclient.WriteResult, error) {
@@ -210,6 +220,13 @@ func (f *fakeStore) Update(ctx context.Context, name, body string, rev baoclient
 	p, ok := f.policies[name]
 	if !ok {
 		return baoclient.WriteResult{}, fmt.Errorf("%w: %s", baoclient.ErrPolicyNotFound, name)
+	}
+	// Both refusals the real client makes before building a request, in
+	// the same order, so the editor meets the same errors here as in
+	// production.
+	if !rev.Metadata.Preservable() {
+		return baoclient.WriteResult{}, fmt.Errorf("%w: %s",
+			baoclient.ErrMetadataNotPreservable, strings.Join(rev.Metadata.Unpreservable, ", "))
 	}
 	if !rev.HasVersion {
 		return baoclient.WriteResult{}, baoclient.ErrConflictProtectionUnsupported

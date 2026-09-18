@@ -42,6 +42,20 @@ var (
 	ErrConflictProtectionUnsupported = errors.New(
 		"baoclient: this server did not return the version metadata a conflict-safe write requires")
 
+	// ErrMetadataNotPreservable means the server reported one of the
+	// writable policy fields in a shape this client does not recognize, so
+	// an update cannot put it back as it found it.
+	//
+	// An update is a POST and a POST resets what it is not sent, so the
+	// only two honest options are to send a value BPE guessed at or to
+	// refuse. Guessing is what this error exists to prevent: a
+	// `cas_required` arriving as the string "true" is not evidence of
+	// anything BPE may safely re-assert, and omitting it would clear the
+	// setting outright. The read still succeeds — the policy can be looked
+	// at — and it is the write that stops. Kevin's instruction, 2026-09-18.
+	ErrMetadataNotPreservable = errors.New(
+		"baoclient: the server reported policy metadata this client cannot preserve across an update")
+
 	// ErrUnauthorized means the token was rejected (401) or lacks the
 	// capability the operation needs (403).
 	ErrUnauthorized = errors.New("baoclient: the token was rejected or lacks the required capability")

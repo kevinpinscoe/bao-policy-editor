@@ -331,6 +331,9 @@ answer a question someone will eventually ask:
 | `TestUpdateDistinguishesAbsentFromFalse` | Is "the server did not report this" kept apart from "the server reported false"? |
 | `TestUpdateNeverSendsTtl` | Could repeated edits push a policy's expiry further out each time? |
 | `TestAWriteWithNoVersionInItsResponseIsReadBack` | After a `204` with no body, does the session still have conflict protection for the next save? |
+| `TestAReadBackOfAnotherClientsWriteIsNotAdopted` | If someone else writes between BPE's write and its read-back, can BPE end up holding their version and overwrite them without a conflict? |
+| `TestMalformedMetadataIsReadableButNotUpdatable` | If the server reports `expiration` or `cas_required` in a shape BPE cannot send back, is the policy still readable — and is the update refused before anything is written? |
+| `TestEveryWritableFieldIsShapeChecked` | Does that shape check cover every preserved field, including one added later? |
 | `TestErrorsNameTheOperationExactlyOnce` | Does a failure read as "updating policy X: updating policy X failed"? |
 | `TestUpdateSendsOnlyThePolicyAndCas` | Could an update quietly clear a policy's `expiration` or `ttl`? |
 | `TestUpdateRefusesWithoutVersionMetadata` | What happens against a server that reports no version? |
@@ -449,6 +452,23 @@ there is no conflict-safe write to be had, and a read-compare-write
 fallback has a race in the middle. Re-open the policy and try again; if
 the server never reports a version, remote updates are not safe on it and
 BPE will keep refusing.
+
+**If the message names a field** — *this server reported `cas_required` in
+a form BPE cannot send back* — the policy is readable but not writable by
+BPE. An update is a POST, and a POST clears what it does not carry, so
+sending the field back is the only way to preserve it and BPE will not
+invent a value it was not given. This one is not fixed by re-opening: look
+at the policy on the server, correct the field there, and re-open
+afterwards. The message appears when the policy is opened, not only when a
+save is attempted, so it is visible before any editing time is spent.
+
+**If a write succeeds but reports** *changed on the server again
+immediately after this write* — someone else wrote the policy in the
+moment between BPE's write and the read-back that establishes its new
+version. Your write landed; theirs landed after it. BPE deliberately does
+not adopt their version, because doing so would let the next save
+overwrite their change without ever showing a conflict. Re-open the policy
+to see what is there now; until you do, the next update is refused.
 
 **If a create was refused** because the name is taken, that is a different
 question with a different answer — BPE offers to open the existing policy.

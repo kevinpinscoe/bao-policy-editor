@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	openbao "github.com/openbao/openbao/api/v2"
@@ -81,7 +82,27 @@ type Metadata struct {
 	// absent otherwise.
 	AllowWildcardsInIdentityTemplates *bool
 	AllowSlashesInIdentityTemplates   *bool
+
+	// Unpreservable names the fields the server did report but in a shape
+	// this client does not recognize — a numeric expiration, a
+	// cas_required arriving as the string "true".
+	//
+	// Absent and unparseable are deliberately not the same thing. Both
+	// leave the field's pointer nil, and until 2026-09-18 both were
+	// treated as "the server did not mention it", so an update omitted the
+	// field and POST cleared it. A field that was never reported is
+	// genuinely nothing to preserve; a field that was reported and not
+	// understood is a value about to be destroyed. Recording the second
+	// case here is what lets Update refuse instead of guessing.
+	//
+	// The names are the server's own, in writableFields order, so the
+	// error can say which field it could not carry.
+	Unpreservable []string
 }
+
+// Preservable reports whether an update built from this metadata can put
+// back everything the server reported.
+func (m Metadata) Preservable() bool { return len(m.Unpreservable) == 0 }
 
 // writableFields is the response fields Metadata round-trips, and the only
 // ones an update sends besides `policy` and `cas`.
@@ -96,30 +117,88 @@ type Metadata struct {
 // would push the expiry further out each time a policy was edited — a
 // policy meant to lapse would quietly become permanent. The absolute
 // expiration is preserved instead. Kevin's instruction, 2026-09-18.
-var writableFields = []string{
-	"expiration",
-	"cas_required",
-	"allow_wildcards_in_identity_templates",
-	"allow_slashes_in_identity_templates",
+//
+// The list is a table rather than plain names so that metadataFrom is
+// driven by it. A second, hand-written list of the same four fields is a
+// list that drifts: adding a field to one and forgetting the other is how
+// a field ends up read but never sent, which on a POST means cleared.
+var writableFields = []writableField{
+	{
+		name: "expiration",
+		read: func(m *Metadata, raw any) bool {
+			v, ok := raw.(string)
+			if ok {
+				m.Expiration = &v
+			}
+			return ok
+		},
+	},
+	{
+		name: "cas_required",
+		read: func(m *Metadata, raw any) bool {
+			v, ok := raw.(bool)
+			if ok {
+				m.CASRequired = &v
+			}
+			return ok
+		},
+	},
+	{
+		name: "allow_wildcards_in_identity_templates",
+		read: func(m *Metadata, raw any) bool {
+			v, ok := raw.(bool)
+			if ok {
+				m.AllowWildcardsInIdentityTemplates = &v
+			}
+			return ok
+		},
+	},
+	{
+		name: "allow_slashes_in_identity_templates",
+		read: func(m *Metadata, raw any) bool {
+			v, ok := raw.(bool)
+			if ok {
+				m.AllowSlashesInIdentityTemplates = &v
+			}
+			return ok
+		},
+	},
 }
 
-// metadataFrom reads the writable fields a response actually carried.
+// writableField is one preserved field: the name the server uses for it
+// and how to take its value out of a response.
+//
+// read reports whether the raw value was a shape this client understands.
+// It never coerces one shape into another — a numeric expiration is not
+// formatted into a timestamp and a "true" string is not parsed into a
+// boolean, because either would mean writing back a value the server
+// never sent.
+type writableField struct {
+	name string
+	read func(*Metadata, any) bool
+}
+
+// metadataFrom reads the writable fields a response actually carried, and
+// records the ones it carried in an unrecognized shape.
+//
+// A JSON null counts as absent rather than unparseable. `"expiration":
+// null` says the policy has no expiration, so omitting the field from the
+// update leaves it exactly as it already is — there is nothing there to
+// destroy, and refusing the update would block a save that cannot lose
+// anything. Kevin's decision, 2026-09-18.
 func metadataFrom(data map[string]any) Metadata {
 	var m Metadata
 	if data == nil {
 		return m
 	}
-	if v, ok := data["expiration"].(string); ok {
-		m.Expiration = &v
-	}
-	if v, ok := data["cas_required"].(bool); ok {
-		m.CASRequired = &v
-	}
-	if v, ok := data["allow_wildcards_in_identity_templates"].(bool); ok {
-		m.AllowWildcardsInIdentityTemplates = &v
-	}
-	if v, ok := data["allow_slashes_in_identity_templates"].(bool); ok {
-		m.AllowSlashesInIdentityTemplates = &v
+	for _, field := range writableFields {
+		raw, present := data[field.name]
+		if !present || raw == nil {
+			continue
+		}
+		if !field.read(&m, raw) {
+			m.Unpreservable = append(m.Unpreservable, field.name)
+		}
 	}
 	return m
 }
@@ -314,7 +393,7 @@ func (c *Client) Create(ctx context.Context, name, body string) (WriteResult, er
 	if err != nil {
 		return WriteResult{}, err
 	}
-	return c.revisionAfterWrite(ctx, name, result), nil
+	return c.revisionAfterWrite(ctx, name, body, result), nil
 }
 
 // Update writes an existing policy with POST, sending the version from rev
@@ -331,6 +410,11 @@ func (c *Client) Create(ctx context.Context, name, body string) (WriteResult, er
 // an OpenBao that knows nothing of the identity-template flags is never
 // told about them, and a policy with no expiration does not acquire one.
 func (c *Client) Update(ctx context.Context, name, body string, rev Revision) (WriteResult, error) {
+	// Both refusals happen before a request is built, so a policy BPE
+	// cannot write safely is never touched at all.
+	if !rev.Metadata.Preservable() {
+		return WriteResult{}, c.unpreservableMetadata(name, rev.Metadata.Unpreservable)
+	}
 	if !rev.HasVersion {
 		return WriteResult{}, c.unsupportedConflictProtection(name)
 	}
@@ -345,7 +429,7 @@ func (c *Client) Update(ctx context.Context, name, body string, rev Revision) (W
 	if err != nil {
 		return WriteResult{}, err
 	}
-	return c.revisionAfterWrite(ctx, name, result), nil
+	return c.revisionAfterWrite(ctx, name, body, result), nil
 }
 
 // revisionAfterWrite fills in the version and metadata a write did not
@@ -358,21 +442,38 @@ func (c *Client) Update(ctx context.Context, name, body string, rev Revision) (W
 // and the metadata carried into the next update would be empty, which is
 // how a POST silently clears it.
 //
-// This is a read-after-write for state, not a conflict check, so the gap
-// between the two carries no risk: if someone else writes in that gap, the
-// version read back is theirs, and the *next* update's check-and-set is
-// what catches it — which is exactly what a check-and-set is for.
+// The re-read has to prove it read back what this client just wrote.
+// There is a gap between the write and the read, and another client can
+// write in it — so the body that comes back is not necessarily BPE's. An
+// earlier version of this function adopted whatever version the read
+// reported and left a comment claiming the next check-and-set would catch
+// the difference. It would not: the version adopted is the *current* one,
+// so the next update's `cas` matches and the other client's change is
+// overwritten with no conflict ever shown.
 //
-// A failed re-read is not a failed write. The policy has already changed
-// on the server, so the write's success is returned as it stands; the
-// caller sees a revision with no version and is told to re-open the policy
-// before updating it again.
-func (c *Client) revisionAfterWrite(ctx context.Context, name string, result WriteResult) WriteResult {
+// So the body is compared, exactly, and the revision is adopted only if it
+// is the one BPE wrote. The comparison is deliberately byte-for-byte: a
+// server that normalizes what it stores would trip it, and being sent back
+// to re-open the policy is the right outcome there too — BPE would
+// otherwise be holding a revision for content it has never seen.
+//
+// A failed re-read is not a failed write, and neither is a mismatched one.
+// The policy has already changed on the server, so the write's success is
+// returned as it stands; the caller sees a revision with no version and is
+// told to re-open the policy before updating it again.
+func (c *Client) revisionAfterWrite(ctx context.Context, name, written string, result WriteResult) WriteResult {
 	if result.Revision.HasVersion {
 		return result
 	}
 	policy, err := c.Read(ctx, name)
 	if err != nil {
+		return result
+	}
+	if policy.Body != written {
+		result.Revision = Revision{}
+		result.Warnings = append(result.Warnings,
+			name+" changed on the server again immediately after this write, so its"+
+				" version could not be established; re-open it before editing it further")
 		return result
 	}
 	result.Revision = policy.Revision
@@ -514,6 +615,20 @@ func (c *Client) notFound(name string) error {
 func (c *Client) malformed(op, detail string) error {
 	return apperr.Newf(apperr.ExitOperational,
 		"the OpenBao server's response could not be understood while %s: %s", op, detail)
+}
+
+// unpreservableMetadata refuses an update that would have to guess at, or
+// silently drop, a field the server reported in an unrecognized shape.
+//
+// The message names the fields, because the person reading it can only act
+// on it by looking at the policy on the server — and "some metadata" would
+// not tell them where to look.
+func (c *Client) unpreservableMetadata(name string, fields []string) error {
+	return apperr.Wrap(apperr.ExitOperational,
+		"refusing to update "+name+": this server reported "+strings.Join(fields, ", ")+
+			" in a form BPE cannot send back, and an update would clear what it cannot preserve",
+		errors.Join(ErrMetadataNotPreservable,
+			errors.New("inspect the policy on the server and correct the field, or update it there")))
 }
 
 func (c *Client) unsupportedConflictProtection(name string) error {
