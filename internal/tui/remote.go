@@ -242,20 +242,48 @@ func (m *Model) fetchServerCopy(store RemoteStore, name string, discard bool) te
 	}
 }
 
-// writePolicy creates or updates the policy the session is backed by.
-//
-// Which of the two it is comes from the backing's own record of whether
-// the policy exists, never from whether a revision happens to be present.
-// A create sends `cas = -1` and a policy that turned up in the meantime is
-// a conflict; an update sends the revision the read reported. Neither ever
-// becomes the other.
+// writePolicy creates or updates the policy the session is backed by,
+// using the revision the session itself holds.
 func (m *Model) writePolicy() tea.Cmd {
+	return m.writePolicyWith(nil)
+}
+
+// writePolicyWith creates or updates the policy, optionally sending a
+// revision other than the session's own.
+//
+// Which of create and update it is comes from the backing's own record of
+// whether the policy exists, never from whether a revision happens to be
+// present. A create sends `cas = -1` and a policy that turned up in the
+// meantime is a conflict; an update sends a revision. Neither ever becomes
+// the other, so an override is meaningless for a create and is ignored
+// there.
+//
+// # Why the override is a parameter rather than session state
+//
+// The reviewed retry after a check-and-set rejection has to send a
+// revision the session does not hold — the one its own re-read reported.
+// Writing that onto the session first would outlive the request: a retry
+// that is cancelled, times out, or fails on TLS would leave the newer
+// revision permanently attached, and a later ordinary save would then be
+// accepted by the server without ever going back through the conflict
+// review. Worse if the document was edited in between, since the accepted
+// write would carry content the review never showed.
+//
+// So the revision belongs to one command and dies with it. The session's
+// revision moves only in MarkRemoteSaved, after the server has confirmed
+// the write — which means a failed retry leaves the original stale
+// revision in place, and the next save conflicts again. Kevin's
+// instruction, 2026-09-18.
+func (m *Model) writePolicyWith(override *baoclient.Revision) tea.Cmd {
 	store, ok := m.session.RemoteStore()
 	if !ok {
 		return nil
 	}
 	name, _ := m.session.RemoteName()
 	rev, exists, _ := m.session.RemoteRevision()
+	if override != nil && exists {
+		rev = *override
+	}
 	body := string(m.session.Current())
 
 	label := "updating " + name

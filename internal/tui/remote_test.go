@@ -101,10 +101,9 @@ func TestSessionBackingIsExactlyOneOf(t *testing.T) {
 		// Every remote mutation is refused rather than silently applied to
 		// a backing that does not exist.
 		for name, err := range map[string]error{
-			"MarkRemoteSaved":     s.MarkRemoteSaved(baoclient.WriteResult{}),
-			"AdoptRemoteRevision": s.AdoptRemoteRevision(baoclient.Revision{}),
-			"MarkRemoteDeleted":   s.MarkRemoteDeleted(),
-			"ReloadRemote":        s.ReloadRemote(baoclient.Policy{}),
+			"MarkRemoteSaved":   s.MarkRemoteSaved(baoclient.WriteResult{}),
+			"MarkRemoteDeleted": s.MarkRemoteDeleted(),
+			"ReloadRemote":      s.ReloadRemote(baoclient.Policy{}),
 		} {
 			if err != ErrNotRemote {
 				t.Errorf("%s on a local session returned %v, want ErrNotRemote", name, err)
@@ -472,6 +471,144 @@ func TestViewingTheServerDiffThenLeavingDoesNotLicenseAnOverwrite(t *testing.T) 
 	}
 	if string(m.session.Current()) != mine || !m.session.Dirty() {
 		t.Error("the refused save disturbed the document")
+	}
+}
+
+// TestAFailedReviewedRetryLeavesTheStaleRevisionInPlace is the regression
+// for the retry's revision outliving the request that carried it.
+//
+// The reviewed retry has to send a revision the session does not hold.
+// Writing it onto the session first — even a moment before dispatching the
+// request — meant a retry that failed on TLS, timed out, or was cancelled
+// left the newer revision permanently attached. The next ordinary save
+// would then be accepted by the server, completing an overwrite that never
+// returned through the conflict review, and carrying whatever the document
+// had become in the meantime.
+//
+// The revision now belongs to the one command. A failed retry must leave
+// the session exactly as it was, so the next save conflicts again.
+func TestAFailedReviewedRetryLeavesTheStaleRevisionInPlace(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fail arranges for the reviewed retry to not be applied, and
+		// returns a function that lets writes succeed again.
+		fail func(t *testing.T, store *fakeStore, m *Model)
+	}{
+		{
+			name: "the retry fails",
+			fail: func(t *testing.T, store *fakeStore, m *Model) {
+				t.Helper()
+				store.errs["update:team-a"] = baoclient.ErrTLS
+				step(t, m, "ctrl+s")
+				delete(store.errs, "update:team-a")
+			},
+		},
+		{
+			name: "the retry is cancelled",
+			fail: func(t *testing.T, store *fakeStore, m *Model) {
+				t.Helper()
+				store.gate = make(chan struct{})
+				_, cmd := m.Update(pressKey("ctrl+s"))
+				if !m.busy {
+					t.Fatal("the reviewed retry did not start")
+				}
+				step(t, m, "esc") // give up before the server answers
+				close(store.gate)
+				store.gate = nil
+				deliver(t, m, cmd) // the late reply arrives and is ignored
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore("https://bao.test:8200")
+			store.seed("team-a", remotePolicyBody, 4)
+
+			m := openRemotePolicy(t, store, "team-a")
+			original, _, _ := m.session.RemoteRevision()
+			if original.Version != 4 {
+				t.Fatalf("opened at revision %d, want 4", original.Version)
+			}
+
+			step(t, m, "d")
+
+			// Somebody else writes, so the first save is stale.
+			const theirs = "path \"secret/data/theirs\" {\n  capabilities = [\"read\"]\n}\n"
+			store.seed("team-a", theirs, 9)
+
+			step(t, m, "s", "ctrl+s")
+			if m.dialog != dialogRemoteConflict {
+				t.Fatalf("the stale write was not refused (dialog = %d)", m.dialog)
+			}
+
+			// The user reviews the server's version and confirms the retry —
+			// which then does not land.
+			step(t, m, "v")
+			if m.reviewKind != reviewServerConflict {
+				t.Fatalf("v did not show the server diff (kind = %d)", m.reviewKind)
+			}
+			tc.fail(t, store, m)
+
+			if got, _ := store.bodyOf("team-a"); got != theirs {
+				t.Fatalf("the failed retry reached the server anyway:\n%s", got)
+			}
+
+			// The session must still carry the revision it read, not the one
+			// the retry was going to send.
+			rev, exists, ok := m.session.RemoteRevision()
+			if !ok || !exists {
+				t.Fatalf("the session lost its remote backing (exists %v, ok %v)", exists, ok)
+			}
+			if rev.Version != original.Version {
+				t.Fatalf("after a failed retry the session carries revision %d, want the original %d",
+					rev.Version, original.Version)
+			}
+			if m.pendingRevision != nil {
+				t.Error("a revision from the failed retry is still held on the model")
+			}
+
+			// The user edits further and saves normally. This must conflict
+			// again rather than complete the overwrite they never got.
+			step(t, m, "d")
+			step(t, m, "s", "ctrl+s")
+
+			if got, _ := store.bodyOf("team-a"); got != theirs {
+				t.Errorf("an ordinary save after a failed retry overwrote the server:\n%s", got)
+			}
+			if m.dialog != dialogRemoteConflict {
+				t.Errorf("the later save was not refused as a conflict (dialog = %d, problem = %q)",
+					m.dialog, m.problem)
+			}
+			if !m.session.Dirty() {
+				t.Error("the refused save cleared the document's modified state")
+			}
+		})
+	}
+}
+
+// TestASuccessfulReviewedRetryAdoptsTheServersNewRevision is the other
+// half: when the write does land, the session moves on — and only then.
+func TestASuccessfulReviewedRetryAdoptsTheServersNewRevision(t *testing.T) {
+	store := newFakeStore("https://bao.test:8200")
+	store.seed("team-a", remotePolicyBody, 4)
+
+	m := openRemotePolicy(t, store, "team-a")
+	step(t, m, "d")
+	mine := string(m.session.Current())
+
+	store.seed("team-a", "path \"x\" {\n  capabilities = [\"read\"]\n}\n", 9)
+	step(t, m, "s", "ctrl+s", "v", "ctrl+s")
+
+	if got, _ := store.bodyOf("team-a"); got != mine {
+		t.Fatal("the reviewed retry did not write the user's version")
+	}
+	// 9 was the server's version; a successful write moves it to 10, and
+	// the session takes that from the write's own result.
+	rev, _, _ := m.session.RemoteRevision()
+	if rev.Version != 10 {
+		t.Errorf("after a successful retry the session carries revision %d, want 10", rev.Version)
+	}
+	if m.session.Dirty() {
+		t.Error("the document is still modified after a successful retry")
 	}
 }
 
@@ -1035,13 +1172,21 @@ func TestAServerWithoutVersionsRefusesToUpdate(t *testing.T) {
 	store := newFakeStore("https://bao.test:8200")
 	store.seed("team-a", remotePolicyBody, 1)
 
-	m := openRemotePolicy(t, store, "team-a")
-
 	// A server that reports no version leaves the session unable to make a
-	// conflict-safe write, and BPE refuses rather than writing blind.
-	if err := m.session.AdoptRemoteRevision(baoclient.Revision{}); err != nil {
+	// conflict-safe write, and BPE refuses rather than writing blind. The
+	// session is built that way rather than mutated into it, since there is
+	// deliberately no longer any method that attaches a revision after the
+	// fact.
+	session, err := OpenRemoteSession(store, baoclient.Policy{
+		Name:     "team-a",
+		Body:     remotePolicyBody,
+		Revision: baoclient.Revision{},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	m := newRemoteModel(t, store, session)
+
 	step(t, m, "d", "s", "ctrl+s")
 
 	if !strings.Contains(m.problem, "conflict protection") &&

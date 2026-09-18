@@ -533,12 +533,16 @@ you wrote exists nowhere — not on the server, not on disk — and opening
 the server's copy replaces it. Declining leaves the draft exactly as it
 was, and reads nothing. Save it under a different name to keep it.
 
-**Looking at the server's version is not a licence to overwrite it.** The
-revision a conflict re-read reports is used only by `ctrl+s` on that same
-review screen. Leaving the review discards it, so an ordinary save
-afterwards carries the version BPE originally read and is refused again —
-which is the right answer for a user who backed out rather than
-confirming.
+**Looking at the server's version is not a licence to overwrite it**, and
+neither is a retry that did not land. The revision a conflict re-read
+reports is used by `ctrl+s` on that same review screen and by nothing
+else: it is handed to that one request rather than kept, and BPE's own
+record of the policy's version moves only when the server confirms a
+write. So leaving the review discards it, and a retry that is cancelled or
+that fails on TLS, a timeout, or a refused connection discards it too. In
+every one of those cases the next ordinary save carries the version BPE
+originally read, is refused again, and comes back through this same
+review — which is the right answer for a write that was never applied.
 
 One detail is undocumented upstream: OpenBao's API reference states
 neither the HTTP status code nor the error body for a failed

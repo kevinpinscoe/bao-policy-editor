@@ -431,12 +431,18 @@ server's copy replaces the only copy of it that exists. Decline, and the
 draft is untouched and nothing is read; save it under another name to keep
 it.
 
-**Backing out of the conflict review does not leave a licence behind.**
-The revision that review's re-read reported is used only by `ctrl+s` on
-that screen. Press Escape instead and it is discarded, so the next
-ordinary save carries the original version and the server refuses it
-again. If you meant to overwrite, go back through `s` → `ctrl+s` → `v` →
-`ctrl+s`.
+**Backing out of the conflict review does not leave a licence behind, and
+neither does a retry that failed.** The revision that review's re-read
+reported is handed to the one write it authorizes and is not kept
+anywhere. Press Escape instead of confirming, or confirm and have the
+write cancelled or fail, and BPE still holds the version it originally
+read — so the next ordinary save is refused again and returns here. If you
+meant to overwrite, go back through `s` → `ctrl+s` → `v` → `ctrl+s`.
+
+That is worth knowing after a flaky connection in particular: a retry that
+timed out has changed nothing, including BPE's idea of what version the
+policy is at, so there is no state to clean up and nothing to check before
+trying again.
 
 ---
 

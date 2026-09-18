@@ -462,23 +462,24 @@ func (s *Session) MarkRemoteSaved(result baoclient.WriteResult) error {
 	return nil
 }
 
-// AdoptRemoteRevision moves the backing onto the revision a fresh read of
-// the server reported, without touching the user's edits.
+// There is deliberately no method here that attaches a revision to the
+// session without a write behind it.
 //
-// This is the second half of resolving a check-and-set rejection: the
-// edits stay exactly as they are, and only the version the next write will
-// send as `cas` changes. Calling it does not authorize that write — the
-// user reviews the server's content first and asks for the retry
-// explicitly.
-func (s *Session) AdoptRemoteRevision(rev baoclient.Revision) error {
-	b, ok := s.remote()
-	if !ok {
-		return ErrNotRemote
-	}
-	b.rev = rev
-	b.exists = true
-	return nil
-}
+// One existed, and it was the source of the same defect twice: the
+// reviewed retry after a check-and-set rejection needs to send a revision
+// the session does not hold, and writing that onto the session — whether
+// when the conflict diff was merely displayed, or a moment before the
+// retry was dispatched — left it attached to a document whose write had
+// not happened. A cancelled or failed retry then left the session holding
+// a revision the server would accept, so a later ordinary save completed
+// an overwrite that never went back through the review.
+//
+// A revision the session did not read for itself now belongs to a single
+// write command and dies with it; see Model.writePolicyWith. The session's
+// own revision moves in exactly three places: a read (OpenRemoteSession),
+// a confirmed write (MarkRemoteSaved), and taking the server's copy
+// wholesale (ReloadRemote). Each of those has the server's current state
+// actually in hand. Kevin's instruction, 2026-09-18.
 
 // MarkRemoteDeleted records that the policy behind this document no
 // longer exists on the server.

@@ -159,15 +159,26 @@ type Model struct {
 	// pendingRevision is the revision a re-read of the server reported
 	// while showing the conflict diff.
 	//
-	// It is held here rather than adopted onto the session, and it is
-	// consumed only by ctrl+s on the reviewServerConflict screen. Writing
-	// it onto the session at the moment the diff was *displayed* would
-	// mean that viewing the server's version, pressing Escape, and later
-	// doing an ordinary save would send that newer revision — an overwrite
-	// the user never confirmed from the conflict review, arrived at by
-	// looking. Leaving that review clears this, so the next ordinary save
-	// carries the stale revision again and the server refuses it again,
-	// which is the correct answer.
+	// It never reaches the session. It is read by ctrl+s on the
+	// reviewServerConflict screen and handed to that one write command
+	// (writePolicyWith), and the session's own revision moves only when the
+	// server confirms the write.
+	//
+	// Both halves of that matter, and each was a defect on its own:
+	//
+	//   - Writing it onto the session when the diff was *displayed* meant
+	//     that looking at the server's version, pressing Escape, and later
+	//     saving normally sent the newer revision — an overwrite reached by
+	//     looking, which the conflict review never authorized.
+	//   - Writing it onto the session just before *dispatching* the retry
+	//     meant a retry that was cancelled or failed left the newer
+	//     revision attached anyway, so a later ordinary save was accepted —
+	//     carrying whatever the document had become since.
+	//
+	// Leaving the review clears this, and a failed write leaves the
+	// session's stale revision untouched, so in both cases the next save
+	// conflicts again and comes back through the review. Kevin's
+	// instruction, 2026-09-18.
 	pendingRevision *baoclient.Revision
 
 	// busy and busyLabel report an in-flight remote operation; op,
@@ -906,6 +917,15 @@ func (m *Model) leaveReview() {
 // It is reachable only from that review screen, and only while the
 // revision it fetched is still held — which together are what make this
 // the reviewed, confirmed overwrite rather than an incidental one.
+//
+// **The revision is handed to the command, not to the session.** Nothing
+// here moves the session's own revision forward: that happens in
+// MarkRemoteSaved, once the server has actually confirmed the write. A
+// retry that is cancelled or that fails therefore leaves the session
+// exactly as it was, still carrying the stale revision the server already
+// rejected — so the next ordinary save conflicts again and comes back
+// through this same review, which is the only place an overwrite is
+// authorized.
 func (m *Model) retryAfterConflictReview() tea.Cmd {
 	if m.pendingRevision == nil {
 		// Nothing fetched, or the review was already left and re-entered
@@ -914,12 +934,9 @@ func (m *Model) retryAfterConflictReview() tea.Cmd {
 		m.problem = "re-read the policy before retrying — press esc, save again, and choose to see what is on the server"
 		return nil
 	}
-	if err := m.session.AdoptRemoteRevision(*m.pendingRevision); err != nil {
-		m.problem = err.Error()
-		return nil
-	}
+	rev := *m.pendingRevision
 	m.leaveReview()
-	return m.writePolicy()
+	return m.writePolicyWith(&rev)
 }
 
 // showReview builds the save review: what is about to be written, against
@@ -1201,13 +1218,18 @@ func (m *Model) handleWrote(msg remoteWroteMsg) (tea.Model, tea.Cmd) {
 	m.screen = screenEditor
 	m.status = verb + " " + name + " on the server"
 
+	// Both of these matter, and they are independent, so they are joined
+	// rather than assigned one after the other — the second assignment used
+	// to drop the first, which meant a server that returned warnings could
+	// hide the fact that it had also returned no version, and the missing
+	// version is the one with a safety consequence.
+	var notes []string
 	if !msg.result.Revision.HasVersion {
-		m.problem = "the server reported no new version for " + name +
-			"; re-open it before the next update, which will otherwise be refused for lack of conflict protection"
+		notes = append(notes, "the server reported no new version for "+name+
+			"; re-open it before the next update, which will otherwise be refused for lack of conflict protection")
 	}
-	if len(msg.result.Warnings) > 0 {
-		m.problem = strings.Join(msg.result.Warnings, "; ")
-	}
+	notes = append(notes, msg.result.Warnings...)
+	m.problem = strings.Join(notes, " | ")
 
 	// A create adds a name the browser has not seen; it is added to the
 	// listing in place rather than by re-listing the server.
