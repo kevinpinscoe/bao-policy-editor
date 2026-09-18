@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/kevinpinscoe/bao-policy-editor/internal/apperr"
@@ -14,8 +15,9 @@ import (
 type Kind int
 
 const (
-	// KindDefault is `bpe` (start empty) or `bpe <policy.hcl>` (open a
-	// file) — the interactive editor, not implemented yet.
+	// KindDefault is `bpe` (start empty), `bpe <policy.hcl>` (open a
+	// file), or `bpe --remote` (start on the remote policy browser) — the
+	// interactive editor.
 	KindDefault Kind = iota
 	KindValidate
 	KindFormat
@@ -48,6 +50,11 @@ type Command struct {
 	// top-level help, or one of "validate"/"format"/"test".
 	HelpTopic string
 
+	// Remote is KindDefault's --remote flag: start the interactive editor
+	// on the remote policy browser instead of on a local document. It
+	// takes no positional argument — see validateRemote.
+	Remote bool
+
 	// ConfigFlags carries the config-related flags the user supplied
 	// explicitly (--address, --token, and so on), for config.Resolve.
 	ConfigFlags config.Flags
@@ -76,7 +83,12 @@ const (
 // in the invocation — before, after, or interspersed with a subcommand —
 // because config resolution is the same regardless of which command is
 // being run. See scanFlags.
+//
+// --remote is scanned here too, so that it is recognized wherever it
+// appears rather than only in one position. It is not a configuration
+// flag, and validateRemote rejects it anywhere it does not belong.
 var globalFlagSpecs = map[string]flagKind{
+	"remote":          flagBool,
 	"address":         flagValue,
 	"token":           flagValue,
 	"namespace":       flagValue,
@@ -213,12 +225,96 @@ func hasHelpFlag(args []string) bool {
 // filesystem access — only string handling — so it is fully testable by
 // calling it directly.
 func ParseArgs(args []string) (*Command, error) {
+	cmd, err := parseArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRemote(cmd); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+// validateRemote enforces that --remote means exactly one thing.
+//
+// It starts the interactive editor on the remote browser and takes no
+// positional argument. `bpe --remote <name>` is rejected rather than
+// treated as a policy name, because `<name>` and `<policy.hcl>` are the
+// same token to a parser and telling them apart would mean guessing from a
+// file extension — which is precisely the mixed local/remote semantics
+// this CLI does not have. A named policy is opened from the browser.
+// Kevin's instruction, 2026-09-18.
+func validateRemote(cmd *Command) error {
+	if !cmd.Remote {
+		return nil
+	}
+
+	switch cmd.Kind {
+	case KindHelp, KindVersion:
+		// --help and --version answer from argv alone and are never
+		// blocked by another flag being present.
+		return nil
+	case KindDefault:
+		if cmd.PolicyFile != "" {
+			return apperr.Usagef(
+				"--remote takes no file argument (got %s): it starts the interactive editor on the "+
+					"remote policy browser, where a policy is chosen by name", cmd.PolicyFile)
+		}
+		return nil
+	default:
+		return apperr.Usage("--remote applies only to the interactive editor, not to validate, format, or test")
+	}
+}
+
+func parseArgs(args []string) (*Command, error) {
 	values, remaining, err := scanFlags(args, globalFlagSpecs)
 	if err != nil {
 		return nil, err
 	}
-	cfgFlags := flagsFromValues(values)
 
+	remote, err := boolFlag(values, "remote")
+	if err != nil {
+		return nil, err
+	}
+
+	cmd, err := parseRemaining(remaining, flagsFromValues(values))
+	if err != nil {
+		return nil, err
+	}
+	// Stamped centrally rather than at each construction site, so a
+	// command built on a path that forgot about --remote cannot silently
+	// lose it and start a local editor instead.
+	cmd.Remote = remote
+	return cmd, nil
+}
+
+// boolFlag reads a boolean flag scanned by scanFlags, rejecting a value it
+// cannot parse rather than treating it as false.
+//
+// Comparing against the literal "true" would be the obvious thing and is
+// wrong twice over: --remote=1 and --remote=T are valid boolean forms that
+// would silently become false, and --remote=garbage would silently become
+// false as well — in both cases starting a local editor for someone who
+// asked for a remote one. The accepted forms are strconv.ParseBool's,
+// which are the standard library flag package's, which is what a reader
+// will expect. This mirrors how --skip-verify is handled in
+// internal/config.
+func boolFlag(values map[string]string, name string) (bool, error) {
+	raw, ok := values[name]
+	if !ok {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, apperr.Usagef(
+			"invalid boolean value for --%s: %q (want one of: 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False)",
+			name, raw,
+		)
+	}
+	return parsed, nil
+}
+
+func parseRemaining(remaining []string, cfgFlags config.Flags) (*Command, error) {
 	if len(remaining) == 0 {
 		return &Command{Kind: KindDefault, ConfigFlags: cfgFlags}, nil
 	}

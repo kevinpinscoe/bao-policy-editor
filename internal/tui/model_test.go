@@ -333,8 +333,8 @@ func TestSaveConflictOffersReloadAndKeepsTheEdits(t *testing.T) {
 
 	// v shows what changed underneath, without resolving anything.
 	send(t, m, "v")
-	if m.screen != screenReview || !m.reviewingConflict {
-		t.Errorf("v did not show the on-disk diff (screen = %d, conflict = %v)", m.screen, m.reviewingConflict)
+	if m.screen != screenReview || m.reviewKind != reviewDiskConflict {
+		t.Errorf("v did not show the on-disk diff (screen = %d, review kind = %d)", m.screen, m.reviewKind)
 	}
 	if !HasChanges(m.review) {
 		t.Error("the conflict diff shows no differences")

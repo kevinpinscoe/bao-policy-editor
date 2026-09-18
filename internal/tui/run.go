@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/kevinpinscoe/bao-policy-editor/internal/apperr"
+	"github.com/kevinpinscoe/bao-policy-editor/internal/config"
 )
 
 // Options configures a run of the interactive editor.
@@ -16,6 +17,20 @@ type Options struct {
 	// PolicyFile is the file to open, or "" to start with an empty
 	// document.
 	PolicyFile string
+
+	// Remote asks the editor to open on the remote policy browser rather
+	// than on a local document. It is mutually exclusive with PolicyFile,
+	// which the CLI enforces as a usage error before ever reaching here.
+	Remote bool
+
+	// Config is BPE's resolved configuration. It is carried whether or not
+	// remote mode is used; nothing reads it on a local run.
+	Config config.Config
+
+	// NewStore builds the OpenBao client. Nil means the real one. It is
+	// injectable so a test can assert it is never called for a local
+	// session — see StoreFactory.
+	NewStore StoreFactory
 
 	// Input and Output are the terminal to run on. Both default to the
 	// process's own when nil, and are injectable so a test can drive the
@@ -31,6 +46,14 @@ type Options struct {
 // inventing a second convention for the TUI. Cancellation — Ctrl+C at the
 // signal level, or ctx being cancelled — comes back as
 // apperr.Interrupted() and exit 130.
+//
+// # Offline by construction
+//
+// A run with Remote false builds no OpenBao client and opens no
+// connection. The client is constructed inside the command that enters
+// remote mode and nowhere else, so `bpe` and `bpe policy.hcl` cannot
+// contact a server even with a fully populated BAO_ADDR and BAO_TOKEN in
+// the environment.
 //
 // # Terminal restoration
 //
@@ -55,8 +78,15 @@ func Run(ctx context.Context, opts Options) error {
 		output = os.Stdout
 	}
 
+	model := NewWithOptions(session, ModelOptions{
+		Context:     ctx,
+		Config:      opts.Config,
+		NewStore:    opts.NewStore,
+		StartRemote: opts.Remote,
+	})
+
 	program := tea.NewProgram(
-		New(session),
+		model,
 		tea.WithContext(ctx),
 		tea.WithInput(input),
 		tea.WithOutput(output),

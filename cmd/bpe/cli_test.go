@@ -24,6 +24,26 @@ func TestParseArgs_Success(t *testing.T) {
 			want: Command{Kind: KindDefault, PolicyFile: "policy.hcl"},
 		},
 		{
+			name: "--remote alone",
+			args: []string{"--remote"},
+			want: Command{Kind: KindDefault, Remote: true},
+		},
+		{
+			name: "--remote with configuration flags",
+			args: []string{"--remote", "--address", "https://bao.test:8200"},
+			want: Command{Kind: KindDefault, Remote: true},
+		},
+		{
+			name: "--remote=false is not remote",
+			args: []string{"--remote=false"},
+			want: Command{Kind: KindDefault},
+		},
+		{
+			name: "--remote does not block --help",
+			args: []string{"--remote", "--help"},
+			want: Command{Kind: KindHelp, Remote: true},
+		},
+		{
 			name: "validate subcommand",
 			args: []string{"validate", "policy.hcl"},
 			want: Command{Kind: KindValidate, PolicyFile: "policy.hcl"},
@@ -131,6 +151,9 @@ func TestParseArgs_Success(t *testing.T) {
 			if got.HelpTopic != tc.want.HelpTopic {
 				t.Errorf("HelpTopic = %q, want %q", got.HelpTopic, tc.want.HelpTopic)
 			}
+			if got.Remote != tc.want.Remote {
+				t.Errorf("Remote = %v, want %v", got.Remote, tc.want.Remote)
+			}
 			if got.FormatCheck != tc.want.FormatCheck {
 				t.Errorf("FormatCheck = %v, want %v", got.FormatCheck, tc.want.FormatCheck)
 			}
@@ -174,6 +197,15 @@ func TestParseArgs_Errors(t *testing.T) {
 		{name: "unexpected argument after --version", args: []string{"--version", "extra"}},
 		{name: "unknown help topic", args: []string{"help", "frobnicate"}},
 		{name: "flag missing its value", args: []string{"--address"}},
+		// --remote takes no positional argument. A policy name and a
+		// filename are the same token to a parser, so rather than guessing
+		// from an extension, both are refused and a policy is chosen in the
+		// browser instead.
+		{name: "--remote with a filename", args: []string{"--remote", "policy.hcl"}},
+		{name: "--remote with a bare name", args: []string{"--remote", "team-a"}},
+		{name: "--remote before validate", args: []string{"--remote", "validate", "policy.hcl"}},
+		{name: "--remote after format", args: []string{"format", "policy.hcl", "--remote"}},
+		{name: "--remote with test", args: []string{"test", "policy.hcl", "--path", "x", "--capability", "read", "--remote"}},
 	}
 
 	for _, tc := range cases {
@@ -181,6 +213,74 @@ func TestParseArgs_Errors(t *testing.T) {
 			_, err := ParseArgs(tc.args)
 			if err == nil {
 				t.Fatalf("ParseArgs(%v) error = nil, want a usage error", tc.args)
+			}
+			var appErr *apperr.AppError
+			if !errors.As(err, &appErr) {
+				t.Fatalf("error is not an *apperr.AppError: %v", err)
+			}
+			if appErr.Code != apperr.ExitUsage {
+				t.Errorf("error code = %v, want %v (%v)", appErr.Code, apperr.ExitUsage, err)
+			}
+		})
+	}
+}
+
+// TestParseArgs_RemoteBooleanForms checks that --remote accepts the same
+// boolean spellings as the standard library flag package, and rejects
+// anything else rather than treating it as false.
+//
+// The regression this guards: comparing the scanned value against the
+// literal "true" made --remote=1 and --remote=T silently false, and
+// --remote=garbage silently false as well — each of them starting a local
+// editor for someone who asked for a remote one.
+func TestParseArgs_RemoteBooleanForms(t *testing.T) {
+	valid := []struct {
+		arg  string
+		want bool
+	}{
+		{"--remote", true},
+		{"--remote=1", true},
+		{"--remote=t", true},
+		{"--remote=T", true},
+		{"--remote=TRUE", true},
+		{"--remote=true", true},
+		{"--remote=True", true},
+		{"--remote=0", false},
+		{"--remote=f", false},
+		{"--remote=F", false},
+		{"--remote=FALSE", false},
+		{"--remote=false", false},
+		{"--remote=False", false},
+	}
+	for _, tc := range valid {
+		t.Run(tc.arg, func(t *testing.T) {
+			got, err := ParseArgs([]string{tc.arg})
+			if err != nil {
+				t.Fatalf("ParseArgs([%q]) error = %v, want nil", tc.arg, err)
+			}
+			if got.Remote != tc.want {
+				t.Errorf("Remote = %v, want %v", got.Remote, tc.want)
+			}
+			if got.Kind != KindDefault {
+				t.Errorf("Kind = %v, want KindDefault", got.Kind)
+			}
+		})
+	}
+
+	invalid := []string{
+		"--remote=garbage",
+		"--remote=yes",
+		"--remote=no",
+		"--remote=2",
+		"--remote=",
+		"--remote=on",
+		"--remote=off",
+	}
+	for _, arg := range invalid {
+		t.Run(arg, func(t *testing.T) {
+			_, err := ParseArgs([]string{arg})
+			if err == nil {
+				t.Fatalf("ParseArgs([%q]) error = nil, want a usage error", arg)
 			}
 			var appErr *apperr.AppError
 			if !errors.As(err, &appErr) {

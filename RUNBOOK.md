@@ -348,6 +348,144 @@ slow machine rather than a defect; that test is the only one that waits
 out the real retry backoff, and it is the reason the suite takes seconds
 rather than milliseconds.
 
+### Step 11 — Work on an OpenBao server's policies
+
+**Why:** remote mode is the only part of BPE that touches a network, and
+everything that makes it safe is a gate the user has to pass through. This
+is how to see each one.
+
+```bash
+export BAO_ADDR=https://openbao.example.com:8200
+export BAO_TOKEN=...          # exported, never typed into BPE
+bpe --remote
+```
+
+**Expected:** the policy browser, listing the policies the token can see.
+`--remote` takes no file argument — `bpe --remote policy.hcl` and
+`bpe --remote team-a` are both usage errors (exit `2`). Pressing `r` in the
+editor does the same thing without restarting.
+
+| To | Press | And expect |
+| --- | --- | --- |
+| Open a policy | `↑`/`↓`, `enter` | The ordinary editor, with `remote · <address>` in the header |
+| Save a change | `s`, then `ctrl+s` | A diff first; nothing is sent until `ctrl+s`. A success leaves you in the editor, with the confirmation on the status line |
+| Create a policy | `n`, name it, edit, `s`, `ctrl+s` | A create; a name already taken is refused, not converted to an update |
+| Delete a policy | `x`, type the exact name, `enter` | Refusal on any other input |
+| Abandon a slow request | `esc` | The request cancelled and nothing applied when it later returns |
+
+**The token is never entered here.** The connect screen shows the address
+and namespace as editable fields and the token only as `configured` or
+`not configured`. If it says `not configured`, the fix is in the
+environment, not on that screen.
+
+**Without a server to hand**, every one of these workflows is exercised
+against an in-memory fake by the test suite, which is the faster way to
+confirm behaviour after a change:
+
+```bash
+go test ./internal/tui/... -run 'Remote|Conflict|Delete|Token|SkipVerify|Local' -v
+```
+
+---
+
+### Step 12 — Recover from a rejected remote write
+
+**Why:** a refused write is the normal, healthy outcome of two people
+editing one policy, and the recovery is a decision rather than a repair.
+Nothing here is automatic.
+
+**What you will see:** *The policy changed on the server* — the write was
+refused because the policy is no longer at the version BPE read. Your
+edits are intact and still marked modified. Three answers:
+
+| Key | Does | Costs you |
+| --- | --- | --- |
+| `v` | Re-reads the server's copy and shows it as a diff against yours | Nothing — this only looks |
+| `r` | Offers to take the server's version instead | Your edits, after a second confirmation |
+| `esc` | Cancels | Nothing; the server is not written to |
+
+**To keep your version**, press `v`, read the diff — it is the change you
+would be replacing — and then `ctrl+s` from that screen. That retries with
+the revision the re-read reported. The footer on that screen says
+*replace the server's version with yours*, because that is what it does.
+
+**To take theirs**, press `r` and confirm. This is the only path that
+discards your edits, and it asks twice for that reason.
+
+**If the message is instead** *this server did not report a version*, BPE
+refused the update rather than attempting it: without version metadata
+there is no conflict-safe write to be had, and a read-compare-write
+fallback has a race in the middle. Re-open the policy and try again; if
+the server never reports a version, remote updates are not safe on it and
+BPE will keep refusing.
+
+**If a create was refused** because the name is taken, that is a different
+question with a different answer — BPE offers to open the existing policy.
+Opening is a read, which produces a real revision, so the write after it
+is a genuine conflict-checked update. The refused create is never retried
+as one.
+
+Opening it asks a second time first. The create was refused, so the draft
+is not on the server, and it was never on disk either — opening the
+server's copy replaces the only copy of it that exists. Decline, and the
+draft is untouched and nothing is read; save it under another name to keep
+it.
+
+**Backing out of the conflict review does not leave a licence behind, and
+neither does a retry that failed.** The revision that review's re-read
+reported is handed to the one write it authorizes and is not kept
+anywhere. Press Escape instead of confirming, or confirm and have the
+write cancelled or fail, and BPE still holds the version it originally
+read — so the next ordinary save is refused again and returns here. If you
+meant to overwrite, go back through `s` → `ctrl+s` → `v` → `ctrl+s`.
+
+That is worth knowing after a flaky connection in particular: a retry that
+timed out has changed nothing, including BPE's idea of what version the
+policy is at, so there is no state to clean up and nothing to check before
+trying again.
+
+---
+
+### Step 13 — Diagnose a connection, TLS, or authorization failure
+
+**Why:** four failures look similar from the outside and have entirely
+different fixes.
+
+| Message | Means | Fix |
+| --- | --- | --- |
+| *could not establish a trusted TLS connection* | The certificate did not verify, or the handshake failed | Point `BAO_CACERT`/`BAO_CAPATH` at the issuing CA, or `BAO_TLS_SERVER_NAME` at the name on the certificate |
+| *the OpenBao token was rejected* (401) | The token is wrong, expired, or revoked | Get a new one; BPE cannot renew it |
+| *the token lacks the capability this operation needs* (403) | The token is valid but not permitted | Grant the capability — the message names which |
+| *connection refused* / a timeout | Nothing is listening, or the address is wrong | Check `BAO_ADDR`; `bao status` from the same shell is the quickest confirmation |
+
+**Required capabilities**, which is what a 403 is about:
+
+| Operation | Capability on |
+| --- | --- |
+| List policies | `list` on `sys/policies/acl` |
+| Read a policy | `read` on `sys/policies/acl/*` |
+| Create or update | `create` and `update` on `sys/policies/acl/*` |
+| Delete | `delete` on `sys/policies/acl/*` |
+
+**A failure never disturbs your work.** A refused connection, a rejected
+token, a TLS failure, and a cancelled request all leave the document and
+every unsaved edit exactly as they were. If a document changed across a
+failed connection, that is a bug worth reporting.
+
+**If certificate verification is disabled** — `--skip-verify` or
+`BAO_SKIP_VERIFY` — a warning sits above the status line on every screen
+for as long as the connection lasts. It is text rather than a colour, so
+it is still there under `NO_COLOR`. It is not dismissible, deliberately:
+this is the setting that gets turned on for an afternoon and left on for a
+year.
+
+**Debug logging:** there is none, and that is deliberate. There is no
+verbose flag that prints requests, because a request carries the token in
+a header and a debug mode is exactly where credentials escape. Diagnose
+from the messages above; if something is genuinely unexplainable, the
+reproduction belongs in `internal/baoclient`'s httptest suite, where the
+wire traffic is visible without a real credential anywhere near it.
+
 ---
 
 ## Credential Handling
@@ -361,5 +499,5 @@ rather than milliseconds.
 ## Maintenance Notes
 
 - **Last game-day test:** 2026-09-17 — build, `--help`/`--version`, a usage error, the interactive editor opened on a policy with comments and an unknown attribute (opened, previewed, diagnosed, rule added, rule duplicated, rule removed with its comments, saved, and the file confirmed to still carry every comment and unknown attribute), the editor started empty and saved to a new path, the editor refusing to replace an existing file, `NO_COLOR=1` confirmed to emit no colour-setting escape sequences, the editor rendered on a pty at 60, 100 and 120 columns, `bpe validate` against a clean policy, a policy with only warnings, a policy with a semantic error, a policy with a syntax error, and a missing file, `bpe format` reformatting a misindented policy, `--check` reporting both "not formatted" and "already formatted" without writing, formatting refusing a genuine syntax error while still formatting a policy with a decode-time error (bad `expiration`) unchanged in meaning, `bpe test` against an allowed request, a denied (default-deny) request, a request whose winning rule carries parameter constraints (`INCOMPLETE`, exit `3`), an unknown-capability usage error, a broader-deny-does-not-override-a-more-specific-allow regression, and a missing file, and Ctrl+C/SIGTERM interruption, all manually exercised against the built binary (FSM-14 added `format`; FSM-13 added `test`; FSM-12 covered everything but those two).
-- **Next scheduled review:** when the OpenBao client is joined to the editor (FSM-17) and remote operations become something a user can actually run.
-- **Known drift risks:** the OpenBao client exists but nothing calls it, so connection, TLS and remote policy-conflict *procedures* must be written when FSM-17 makes them reachable — not backfilled from assumption now. Two things about the client are unproven against a live server and stay that way until one is available: the exact wire form of a failed check-and-set (OpenBao documents neither the status code nor the error body), and whether the endpoint's PATCH accepts the `application/merge-patch+json` content type the official client sends, which its API reference does not state either. Both are isolated to one constant and one matcher, and both are noted in the code at the point they matter. The editor's own limits are documented in README.md: a field whose value is not a plain literal is read-only rather than rewritten, the effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, and a duplicated rule is appended at the end of the file rather than inserted after the original. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.
+- **Next scheduled review:** the first time BPE is pointed at a live OpenBao server, to confirm the two wire-level assumptions below against a real instance.
+- **Known drift risks:** remote operations are reachable now (Steps 11-13), but two things about the client remain unproven against a live server and stay that way until one is available: the exact wire form of a failed check-and-set (OpenBao documents neither the status code nor the error body), and whether the endpoint's PATCH accepts the `application/merge-patch+json` content type the official client sends, which its API reference does not state either. Both are isolated to one constant and one matcher, and both are noted in the code at the point they matter. Until a live instance has been used, treat Steps 11-13's remote procedures as verified against the in-memory fake and the httptest suite rather than against real infrastructure — the editor's side of every one of them is tested, but the server's exact responses are not yet observed. The editor's own limits are documented in README.md: a field whose value is not a plain literal is read-only rather than rewritten, the effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, and a duplicated rule is appended at the end of the file rather than inserted after the original. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.

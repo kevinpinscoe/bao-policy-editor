@@ -6,6 +6,7 @@ OpenBao HCL ACL policies.
 Usage:
   bpe                                     Start the interactive editor with an empty policy
   bpe <policy.hcl>                        Start the interactive editor, opening a policy file
+  bpe --remote                            Start the interactive editor on an OpenBao server's policies
   bpe validate <policy.hcl>               Validate a policy without starting the interactive editor
   bpe format <policy.hcl> [--check]       Format a policy file, or check whether it is formatted
   bpe test <policy.hcl> --path <path> --capability <capability>
@@ -24,11 +25,18 @@ screen, and ? shows the full key reference. It edits the file you opened
 rather than regenerating it, so comments, attributes BPE does not
 recognize, and unsupported blocks are preserved; where a value cannot be
 rewritten safely, that one field is shown read-only with the reason.
-OpenBao connectivity is not implemented yet — see RUNBOOK.md for current
-limitations.
+
+bpe --remote starts that same editor on an OpenBao server instead of a
+local file, listing the policies your token can see. It takes no file
+argument; a policy is chosen by name in the browser. Pressing r in the
+editor does the same thing without restarting. Remote writes always show
+a diff and ask for confirmation first, and deleting a policy asks for its
+name typed out. bpe and bpe <policy.hcl> never build a client or contact
+a server, whatever BAO_ADDR and BAO_TOKEN are set to.
 
 Global flags (accepted anywhere on the command line, before or after a
 command; see Configuration in README.md for precedence):
+  --remote                      Start the interactive editor on a server's policies (no file argument)
   --address <url>              OpenBao server URL (BAO_ADDR / VAULT_ADDR)
   --token <token>               OpenBao authentication token (BAO_TOKEN / VAULT_TOKEN)
   --namespace <namespace>       OpenBao namespace (BAO_NAMESPACE / VAULT_NAMESPACE)
@@ -39,8 +47,8 @@ command; see Configuration in README.md for precedence):
   --tls-server-name <name>      TLS server name override (BAO_TLS_SERVER_NAME / VAULT_TLS_SERVER_NAME)
   --skip-verify                 Disable TLS certificate verification (BAO_SKIP_VERIFY / VAULT_SKIP_VERIFY)
 
-These are accepted and resolved now for the OpenBao client landing in a
-later ticket; no command in this release contacts a server.
+Only the interactive editor's remote mode reads these. validate, format,
+and test are local-file operations and contact no server.
 `
 
 const validateHelp = `bpe validate <policy.hcl> — validate a policy without starting the
@@ -126,5 +134,5 @@ func helpText(topic string) string {
 // error, so a mistyped invocation shows the shape it should have taken
 // without dumping the entire help text to stderr.
 func usageLine() string {
-	return "usage: bpe [<policy.hcl>] | validate <policy.hcl> | format <policy.hcl> [--check] | test <policy.hcl> --path <path> --capability <capability> | --help | --version"
+	return "usage: bpe [<policy.hcl>] | bpe --remote | validate <policy.hcl> | format <policy.hcl> [--check] | test <policy.hcl> --path <path> --capability <capability> | --help | --version"
 }

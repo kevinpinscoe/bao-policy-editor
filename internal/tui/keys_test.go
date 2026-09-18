@@ -70,6 +70,9 @@ func TestPressKeyMatchesWhatUpdateSees(t *testing.T) {
 		"enter", "esc", "tab", "shift+tab", "up", "down", "left", "right",
 		"home", "end", "a", "d", "x", "p", "g", "t", "s", "q", "y", "n", "r",
 		"v", "c", "j", "k", "?", "ctrl+s", "ctrl+c", "ctrl+d",
+		// Remote mode: o opens a policy whose name a create collided with,
+		// and / focuses the browser's filter.
+		"o", "/",
 	}
 	for _, keystroke := range bound {
 		if got := pressKey(keystroke).String(); got != keystroke {

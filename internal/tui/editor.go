@@ -60,11 +60,18 @@ func renderEditor(st Styles, s *Session, selected, height, width int) (string, i
 // header carries the same information with NO_COLOR set.
 func renderHeader(st Styles, s *Session, width int) string {
 	name := s.Filename()
-	if !s.HasFile() {
-		name = "(unsaved policy)"
-	}
 
-	var flags []string
+	// Where the document lives leads the flag list, spelled out, because
+	// "modified" means two very different things depending on the answer —
+	// an unsaved file, or a policy a server is still serving the old
+	// version of. It is a word rather than a colour so the distinction
+	// survives NO_COLOR. Kevin's instruction, 2026-09-18.
+	origin := st.Dim.Render(s.Origin())
+	if s.IsRemote() {
+		origin = st.Subtitle.Render(s.Origin())
+	}
+	flags := []string{origin}
+
 	if s.Dirty() {
 		flags = append(flags, st.Warning.Render("modified"))
 	} else {

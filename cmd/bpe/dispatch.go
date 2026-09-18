@@ -67,11 +67,15 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 }
 
 // dispatchCommand performs the action a parsed Command names. Every
-// branch does real, verified work — never a false success. cfg is
-// threaded through for the OpenBao connectivity landing in FSM-16 and is
-// not read yet. stdout is read by KindValidate (FSM-12), KindTest
-// (FSM-13), and KindFormat (FSM-14); KindDefault (FSM-15) takes both
-// stdin and stdout, since the interactive editor runs on them.
+// branch does real, verified work — never a false success. stdout is read
+// by KindValidate (FSM-12), KindTest (FSM-13), and KindFormat (FSM-14);
+// KindDefault (FSM-15, FSM-17) takes both stdin and stdout, since the
+// interactive editor runs on them.
+//
+// cfg reaches only KindDefault, and only the editor's remote mode reads
+// it. validate, format, and test are local-file operations that contact no
+// server, so passing the configuration to them would suggest a
+// connectivity they do not have.
 func dispatchCommand(ctx context.Context, cmd *Command, cfg config.Config, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return apperr.Interrupted()
@@ -79,7 +83,13 @@ func dispatchCommand(ctx context.Context, cmd *Command, cfg config.Config, stdin
 
 	switch cmd.Kind {
 	case KindDefault:
-		return tui.Run(ctx, tui.Options{PolicyFile: cmd.PolicyFile, Input: stdin, Output: stdout})
+		return tui.Run(ctx, tui.Options{
+			PolicyFile: cmd.PolicyFile,
+			Remote:     cmd.Remote,
+			Config:     cfg,
+			Input:      stdin,
+			Output:     stdout,
+		})
 	case KindValidate:
 		return runValidate(cmd.PolicyFile, stdout)
 	case KindFormat:
