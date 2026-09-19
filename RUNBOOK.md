@@ -539,6 +539,81 @@ wire traffic is visible without a real credential anywhere near it.
 
 ---
 
+### Step 14 — Run the live smoke test against a disposable OpenBao
+
+**Why:** everything else in this suite runs against fakes and `httptest`, deliberately. One
+question cannot be answered that way. After a write, BPE re-reads the policy to learn the
+version the write produced — the endpoint answers a write with `204` and no body — and it
+adopts that version **only if the policy read back is byte-for-byte what it wrote**. That
+guard is what stops another client's concurrent write being adopted as BPE's own version
+and silently overwritten. Its cost is that any server-side normalization of a stored policy
+body would make every second consecutive save in a session fail for lack of conflict
+protection. Only a real OpenBao can say whether that happens.
+
+Run it after any change to `internal/baoclient`'s write path, and before a release.
+
+```bash
+bash scripts/live-smoke.sh
+```
+
+That is the whole invocation. It takes no arguments and needs no configuration — set
+`BPE_SMOKE_PORT` only if `8211` is taken on your machine.
+
+**What it does:** starts a throwaway `bao server -dev` on `127.0.0.1`, runs the
+`livesmoke`-tagged tests in `internal/tui` against it, verifies every disposable policy was
+removed, and stops the server.
+
+**Expected output** ends with:
+
+```text
+== every disposable policy was removed; only default and root remain ==
+== LIVE SMOKE TEST PASSED ==
+```
+
+**Why you can run it on a workstation whose shell points at a real server.** This is the
+part worth reading before you run it, because a great many developer shells already export
+`BAO_ADDR` and `BAO_TOKEN` for something that matters. The script:
+
+- clears every inherited `BAO_*` and `VAULT_*` variable before anything starts, so nothing
+  from your shell reaches the server, the CLI, or the tests;
+- binds the dev server to `127.0.0.1` and **aborts** if the resulting address is not
+  loopback;
+- **aborts unless the instance reports `storage_type=inmem`** — an in-memory dev server
+  persists nothing and dies with the process;
+- **aborts if more than the dev server's own `default` and `root` policies are present**,
+  because anything else means this is not the fresh throwaway it is supposed to be;
+- takes the root token from OpenBao's own output in a `0600` file inside a `700` temporary
+  directory, never passes it as a command-line argument, never echoes it, and shreds the
+  file on exit;
+- kills only the process it started, by the pid it was given, through an `EXIT`/`INT`/`TERM`
+  trap;
+- lists the policies afterwards and **fails the run** if a disposable one was left behind —
+  they die with the server either way, but a leftover means a test's cleanup did not run.
+
+The test file adds its own refusal on top: it skips unless `BPE_LIVE_ADDR` and
+`BPE_LIVE_TOKEN` are set, and fails immediately on any address that does not begin
+`http://127.0.0.1:` — checked before a single request is made.
+
+**It is never run by CI and never by an ordinary test run.** `go test ./...` does not
+compile it; only `-tags livesmoke` does. Confirm that for yourself:
+
+```bash
+go test ./internal/tui/ -run TestLive -v    # expect: "no tests to run"
+```
+
+**If this fails:** read which check failed before assuming BPE is at fault. A `FATAL`
+line naming `storage_type`, a non-loopback address, or a pre-existing policy count is the
+harness refusing to run — not a test result. A genuine failure in
+`TestLiveReadUpdateAndASecondSaveWithoutReopening` is the interesting one: it means a
+second consecutive save was refused, which points at the server storing something other
+than the bytes BPE sent.
+
+**Never point this at a server whose data matters.** There is deliberately no flag to aim
+it at an existing instance; the safety argument above rests entirely on the server being
+one the script created and can prove is disposable.
+
+---
+
 ## Credential Handling
 
 `BAO_TOKEN` and any other `BAO_*` credential-bearing environment variables must never appear in logs, diagnostic output, terminal screenshots, or bug reports. `internal/config.Config` holds the resolved token as a `SensitiveString`, a type whose formatting is redacted under every `fmt` verb (`%v`, `%+v`, `%#v`, `%s`, `%q`) and in error messages; only an explicit `.Reveal()` call returns the raw value, and the sole caller is `internal/baoclient.New`, which needs it to authenticate.
@@ -551,5 +626,25 @@ wire traffic is visible without a real credential anywhere near it.
 
 - **Last game-day test:** 2026-09-17 — build, `--help`/`--version`, a usage error, the interactive editor opened on a policy with comments and an unknown attribute (opened, previewed, diagnosed, rule added, rule duplicated, rule removed with its comments, saved, and the file confirmed to still carry every comment and unknown attribute), the editor started empty and saved to a new path, the editor refusing to replace an existing file, `NO_COLOR=1` confirmed to emit no colour-setting escape sequences, the editor rendered on a pty at 60, 100 and 120 columns, `bpe validate` against a clean policy, a policy with only warnings, a policy with a semantic error, a policy with a syntax error, and a missing file, `bpe format` reformatting a misindented policy, `--check` reporting both "not formatted" and "already formatted" without writing, formatting refusing a genuine syntax error while still formatting a policy with a decode-time error (bad `expiration`) unchanged in meaning, `bpe test` against an allowed request, a denied (default-deny) request, a request whose winning rule carries parameter constraints (`INCOMPLETE`, exit `3`), an unknown-capability usage error, a broader-deny-does-not-override-a-more-specific-allow regression, and a missing file, and Ctrl+C/SIGTERM interruption, all manually exercised against the built binary (FSM-14 added `format`; FSM-13 added `test`; FSM-12 covered everything but those two).
 - **Last live smoke test:** 2026-09-18 against a disposable in-memory OpenBao 2.5.2 on loopback — RUNBOOK Step 11. Covered an ordinary policy, one with an explicit `expiration`, one whose expiration came from a `ttl`, and one with `cas_required = true`; each updated through the real TUI with the body changing, the version advancing and the metadata intact. A stale write was provoked with a second client and presented as a conflict rather than a generic failure, the server's version was reviewed, and the deliberate retry succeeded. Every disposable policy was deleted afterwards and no credential reached any file.
+- **Last release-hardening pass:** 2026-09-19 (FSM-18) — CI added covering gofmt, `go vet`,
+  `go build`, `go test`, `go test -race`, a `go mod tidy` no-op check, a cross-compile
+  matrix for linux/darwin on amd64/arm64, and Markdown lint; `SECURITY.md` written;
+  supported platforms and the release position documented; the live smoke harness preserved
+  as `scripts/live-smoke.sh` plus a `livesmoke`-tagged test (Step 14) and re-run green from
+  the repository. The non-interactive CLI surface was re-exercised against the built binary
+  — `--version`, `--help`, an unknown flag (exit `2`), `validate` clean (`0`) and on a
+  syntax error (`1`), `format --check` (`0`), `test` reporting `INCOMPLETE` (`3`), and
+  `--remote` with a stray argument (`2`) — each exit code matching the documented contract.
+  **The interactive terminal workflows were not re-driven by hand in that pass**; they were
+  last exercised on 2026-09-17 above, and the width and no-colour cases are additionally
+  asserted by `internal/tui`'s own tests on every run.
+- **Licensing, verified 2026-09-19:** BPE is MPL-2.0 by its `LICENSE` file. All 42 modules
+  in the build graph carry a licence file — 28 MIT, 11 MPL-2.0 (including
+  `github.com/openbao/openbao/api/v2` and `github.com/hashicorp/hcl/v2`), 2 Apache-2.0, 1
+  ISC — every one of which is compatible with distributing this project under MPL-2.0.
+  **Go source files carry no per-file licence header**, which MPL-2.0 §3.4 permits when the
+  notice is somewhere a recipient would look; `LICENSE` at the repository root is that
+  place. Adding `SPDX-License-Identifier` headers to the 61 Go files remains an option, not
+  an outstanding defect.
 - **Next scheduled review:** when BPE is first used against an OpenBao older or newer than 2.5.x, since the update path's compatibility is the thing that has been version-specific before.
 - **Known drift risks:** the two wire-level assumptions that used to sit here are resolved, and resolved differently from each other. The failed check-and-set is `400` carrying `check-and-set parameter did not match the current version`, which BPE's matcher recognizes — that one held. The other did not: `sys/policies/acl` does **not** implement PATCH on 2.5.x, answering `405 unsupported operation`, so BPE now updates with a POST that echoes the policy's writable metadata back (see README.md's [Remote policies](README.md#remote-policies)). The remaining version risk is the mirror image: newer OpenBao releases document PATCH here, and if a future release were ever to *stop* accepting the POST form, the update path would need revisiting. POST is the older and more widely accepted of the two, which is why it is the one BPE uses. The editor's own limits are documented in README.md: a field whose value is not a plain literal is read-only rather than rewritten, the effective-access screen refuses to answer for a policy containing content BPE cannot fully represent, and a duplicated rule is appended at the end of the file rather than inserted after the original. `bpe validate`'s KV v2 and list/scan-prefix checks are same-file heuristics only — they have no access to a policy's real OpenBao mount configuration, so they can both miss real problems and flag paths that are actually fine; treat their output as guidance, not ground truth. `bpe test` has its own, separate scope limits — see README.md's [Evaluation limits](README.md#evaluation-limits) — and its expiration handling is a snapshot at the moment it runs, not live (README.md's [Expiration is a snapshot, not live](README.md#expiration-is-a-snapshot-not-live)). `bpe format`'s write-conflict detection narrows but does not close the check-then-rename race, and does not preserve ACLs or extended attributes — see README.md's [File writes](README.md#file-writes). Hard-link detection is Unix-only and silently skipped where unavailable.
