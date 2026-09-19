@@ -1,0 +1,344 @@
+name: Publish Release
+
+# Started by a repository_dispatch, never by a tag push and never by a
+# workflow_dispatch.
+#
+# WHY NOT A TAG PUSH
+#
+# GitHub runs a `push`-triggered workflow from the definition present in the
+# commit being tagged, not from the default branch. A tag placed on an older
+# commit therefore executes that commit's historical workflow, and every
+# check added afterwards is silently bypassed — the tags most in need of the
+# checks are exactly the ones that would skip them. The previous
+# tag-triggered workflow, `.github/workflows/release.yml` (numeric id
+# 362139186), is retained as a tombstone and **disabled manually** so no
+# historical commit can start it. Do not re-enable it.
+#
+# WHY NOT workflow_dispatch
+#
+# `workflow_dispatch` lets the *caller* choose which ref the workflow
+# definition is read from (`gh workflow run --ref <anything>`). A runbook
+# instruction to pass `--ref main` is a convention, not an enforced property,
+# and the whole point of this hardening is to make "the checks that run are
+# the ones on the default branch" true by construction.
+#
+# `repository_dispatch` has no such knob: GitHub always runs it from the
+# default branch. That is the security boundary this workflow exists to
+# create. The tag to publish arrives as payload data instead of as a ref.
+
+on:
+  repository_dispatch:
+    types: [publish-release]
+
+# The request id makes a specific dispatch identifiable in the run list.
+# Without it, concurrent dispatches are indistinguishable and "watch the
+# newest run" is ambiguous — see RUNBOOK.md Step 16.
+run-name: Publish ${{ github.event.client_payload.tag }} (${{ github.event.client_payload.request_id }})
+
+# Nothing by default. Each job grants itself exactly what it needs, so the
+# job that merely inspects a tag cannot write to the repository.
+permissions: {}
+
+# Pinned once, used everywhere, and documented in RUNBOOK.md. A release built
+# by a different toolchain than the one its dry run used is a release nobody
+# actually rehearsed.
+env:
+  GORELEASER_VERSION: "2.17.1"
+  SYFT_VERSION: "v1.49.0"
+  COSIGN_VERSION: "v3.0.6"
+
+jobs:
+  # Everything that can refuse happens here, before a single artifact exists.
+  # Every check is fail-closed: the job exits non-zero on anything it cannot
+  # positively confirm, and `release` will not start.
+  preflight:
+    name: Verify the tag and the credentials
+    runs-on: ubuntu-latest
+    permissions:
+      # Read-only. This job inspects; it never publishes.
+      contents: read
+    outputs:
+      # The two immutable identities the publishing job re-binds to. A tag
+      # name is mutable; these are not.
+      tag_object_sha: ${{ steps.verify_tag.outputs.tag_object_sha }}
+      commit_sha: ${{ steps.verify_tag.outputs.commit_sha }}
+    steps:
+      # Checks out the default branch head, which under repository_dispatch is
+      # what github.sha refers to. The tag is fetched explicitly below; it is
+      # deliberately not what this job is checked out at.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify the requested tag
+        id: verify_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.client_payload.tag }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id }}
+        run: |
+          set -euo pipefail
+
+          echo "::group::Payload"
+          # A dispatch carrying no tag, or no request id, is not a release
+          # request anyone can audit afterwards.
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::client_payload.tag is empty. Nothing to publish."
+            exit 1
+          fi
+          if [ -z "${REQUEST_ID:-}" ]; then
+            echo "::error::client_payload.request_id is empty. A dispatch must be correlatable to its run."
+            exit 1
+          fi
+          echo "tag:        ${TAG}"
+          echo "request id: ${REQUEST_ID}"
+
+          # 0. The shape is a semantic version tag. The retired `on: push:
+          #    tags:` filter enforced this for free; payload data does not, so
+          #    it is an explicit check. The pattern is the exact equivalent of
+          #    that filter's `v[0-9]+.[0-9]+.[0-9]+`.
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'${TAG}' is not a vMAJOR.MINOR.PATCH tag. Releases are cut from semantic-version tags only."
+            exit 1
+          fi
+          echo "${TAG} is a well-formed semantic-version tag"
+          echo "::endgroup::"
+
+          echo "::group::Tag object"
+          # Fetch the tag ref itself, not merely the commit it points at.
+          git fetch --no-tags --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+
+          # 1. Annotated, not lightweight. A lightweight tag is a bare ref with
+          #    no object of its own — no tagger, no message, nothing that can
+          #    be signed — so the remaining checks would have nothing to
+          #    inspect.
+          object_type=$(git cat-file -t "refs/tags/${TAG}")
+          echo "tag object type: ${object_type}"
+          if [ "${object_type}" != "tag" ]; then
+            echo "::error::${TAG} is a lightweight tag. Releases are cut from annotated, signed tags (git tag -s)."
+            exit 1
+          fi
+
+          # The outer annotated-tag object, and the commit it dereferences to.
+          # Both are recorded as job outputs and re-checked before publishing.
+          tag_object_sha=$(git rev-parse "refs/tags/${TAG}")
+          commit_sha=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          echo "tag object:      ${tag_object_sha}"
+          echo "dereferences to: ${commit_sha}"
+
+          # 2. What this runner fetched is what GitHub actually holds. A
+          #    disagreement here means the ref moved between the fetch and the
+          #    API read, or that the local ref is not the published one.
+          api_tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')
+          if [ "${api_tag_sha}" != "${tag_object_sha}" ]; then
+            echo "::error::${TAG} is ${api_tag_sha} on GitHub but ${tag_object_sha} locally."
+            exit 1
+          fi
+
+          # 3. GitHub reports the signature as verified. This is GitHub's own
+          #    judgement against the keys registered on the account, not a
+          #    local check that would pass for any key at all.
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.verification.verified')
+          reason=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.verification.reason')
+          echo "signature verified: ${verified} (${reason})"
+          if [ "${verified}" != "true" ]; then
+            echo "::error::${TAG}'s signature is not verified by GitHub (reason: ${reason})."
+            exit 1
+          fi
+
+          # 4. The commit is on the default branch. This is what stops a
+          #    release being cut from a branch that was never reviewed or
+          #    merged — a tag can be created on any commit at all.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "${commit_sha}" origin/main; then
+            echo "::error::${commit_sha} is not contained in origin/main. Release only from merged commits."
+            exit 1
+          fi
+          echo "${commit_sha} is contained in origin/main"
+          echo "::endgroup::"
+
+          {
+            echo "tag_object_sha=${tag_object_sha}"
+            echo "commit_sha=${commit_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Tag ${TAG} accepted: well-formed, annotated, verified by GitHub, and merged into main."
+
+      # --- the credentials ----------------------------------------------
+      #
+      # GoReleaser pushes to three other repositories near the *end* of its
+      # run, after the release and its artifacts already exist. A token that
+      # is missing or under-scoped therefore fails late, leaving a published
+      # release with no cask, no manifest and no package repositories — the
+      # half-finished state this repository's release procedure forbids.
+      # Proving the access up front turns that into a refusal to start.
+      #
+      # Every check is read-only. Token values reach `gh` only through the
+      # environment: never echoed, never written, never a command-line
+      # argument, and `set -x` is never enabled in this step.
+      - name: Verify the release credentials
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          REPO_DISPATCH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in HOMEBREW_TAP_TOKEN SCOOP_BUCKET_TOKEN REPO_DISPATCH_TOKEN; do
+            # Indirect expansion reads the value without ever rendering it.
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is empty or unset on this repository."
+              missing=1
+            else
+              echo "${name}: present"
+            fi
+          done
+          [ "${missing}" -eq 0 ] || {
+            echo "::error::Set the missing secrets before publishing. See RUNBOOK.md Step 16."
+            exit 1
+          }
+
+          # can_push <TOKEN_ENV_NAME> <owner/repo>
+          #
+          # Asks the API what the token may do with a repository. The
+          # `permissions.push` field is GitHub's own answer for the
+          # authenticated identity, so this proves write access without
+          # writing anything. The token is passed by exporting GH_TOKEN for
+          # the single command, never as an argument.
+          can_push() {
+            local token_name="$1" repo="$2" push
+            push=$(GH_TOKEN="${!token_name}" gh api "repos/${repo}" --jq '.permissions.push' 2>/dev/null || echo "error")
+            if [ "${push}" != "true" ]; then
+              echo "::error::${token_name} cannot push to ${repo} (permissions.push=${push}). It needs Contents: read and write on that repository."
+              return 1
+            fi
+            echo "${token_name} -> ${repo}: push confirmed"
+          }
+
+          failed=0
+          can_push HOMEBREW_TAP_TOKEN  kevinpinscoe/homebrew-tap  || failed=1
+          can_push SCOOP_BUCKET_TOKEN  kevinpinscoe/scoop-bucket  || failed=1
+          # One token, both package repositories: the dispatch that notifies
+          # them is Contents-write on each, not an Actions permission.
+          can_push REPO_DISPATCH_TOKEN kevinpinscoe/apt           || failed=1
+          can_push REPO_DISPATCH_TOKEN kevinpinscoe/rpm           || failed=1
+          [ "${failed}" -eq 0 ] || exit 1
+
+          echo "All three credentials proven before anything is built."
+
+  release:
+    name: Build, sign and publish
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      # contents:write creates the release and uploads its assets;
+      # id-token:write is what lets cosign obtain a short-lived Sigstore
+      # certificate from GitHub's OIDC provider.
+      contents: write
+      id-token: write
+    steps:
+      # Checked out by immutable commit SHA — the one preflight verified —
+      # and never by the tag name. A tag name is a mutable ref: re-resolving
+      # it here would reopen the time-of-check/time-of-use gap that lets a
+      # tag moved between jobs publish a commit nothing ever verified.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          # GoReleaser builds release notes from the commit range since the
+          # previous tag, so it needs the whole history, not a shallow clone.
+          fetch-depth: 0
+
+      # Closes the remaining window: preflight ran some seconds ago, and the
+      # tag could have been moved or recreated since. Both identities must
+      # still be exactly what preflight recorded. There is deliberately no
+      # fallback that tolerates a moved or recreated tag — the only correct
+      # response is to stop.
+      - name: Re-bind the tag to what preflight verified
+        env:
+          TAG: ${{ github.event.client_payload.tag }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ needs.preflight.outputs.tag_object_sha }}
+          EXPECTED_COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+
+          current_tag_object_sha=$(git rev-parse "refs/tags/${TAG}")
+          current_commit_sha=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          checked_out=$(git rev-parse HEAD)
+
+          echo "expected tag object: ${EXPECTED_TAG_OBJECT_SHA}"
+          echo "current  tag object: ${current_tag_object_sha}"
+          echo "expected commit:     ${EXPECTED_COMMIT_SHA}"
+          echo "current  commit:     ${current_commit_sha}"
+          echo "checked out:         ${checked_out}"
+
+          if [ "${current_tag_object_sha}" != "${EXPECTED_TAG_OBJECT_SHA}" ]; then
+            echo "::error::${TAG} has been moved or recreated since preflight verified it. Refusing to publish."
+            exit 1
+          fi
+
+          if [ "${current_commit_sha}" != "${EXPECTED_COMMIT_SHA}" ]; then
+            echo "::error::${TAG} now resolves to ${current_commit_sha}, not the verified ${EXPECTED_COMMIT_SHA}. Refusing to publish."
+            exit 1
+          fi
+
+          if [ "${checked_out}" != "${EXPECTED_COMMIT_SHA}" ]; then
+            echo "::error::working tree is at ${checked_out}, not the verified ${EXPECTED_COMMIT_SHA}."
+            exit 1
+          fi
+
+          echo "Tag ${TAG} still binds to the verified commit. Proceeding."
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean
+        env:
+          # GITHUB_TOKEN is injected by Actions and needs no secret of its own.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Consumed by GoReleaser's homebrew_casks and scoops blocks to push
+          # to repositories this one cannot otherwise write to.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          # The checkout is a detached commit, not a tag, so GoReleaser cannot
+          # infer the version from the ref. This names it explicitly — the
+          # same tag preflight verified and the step above re-bound.
+          GORELEASER_CURRENT_TAG: ${{ github.event.client_payload.tag }}
+
+      # The package repositories build their own indexes from the published
+      # release. `new-release` is the event both of their add-package.yml
+      # workflows already listen for; it is not a mechanism invented here.
+      - name: Notify apt repo
+        run: |
+          gh api repos/kevinpinscoe/apt/dispatches \
+            --method POST \
+            --field event_type=new-release \
+            --field client_payload[repo]="${{ github.repository }}" \
+            --field client_payload[tag]="${{ github.event.client_payload.tag }}"
+        env:
+          GH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}
+
+      - name: Notify rpm repo
+        run: |
+          gh api repos/kevinpinscoe/rpm/dispatches \
+            --method POST \
+            --field event_type=new-release \
+            --field client_payload[repo]="${{ github.repository }}" \
+            --field client_payload[tag]="${{ github.event.client_payload.tag }}"
+        env:
+          GH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}

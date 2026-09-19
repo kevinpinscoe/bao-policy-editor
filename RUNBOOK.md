@@ -684,10 +684,18 @@ A genuine failure is worth acting on: these are the paths a user touches first.
 
 ### Step 16 — Cut a release
 
-**Why:** this is the only irreversible procedure in this runbook. A pushed tag publishes a
-GitHub release, pushes a cask to `homebrew-tap` and a manifest to `scoop-bucket`, and fires
-`repository_dispatch` at `apt` and `rpm`, which rebuild their indexes. None of that can be
-quietly undone once other machines have fetched it.
+**Why:** this is the only irreversible procedure in this runbook.
+
+**Authorizing this step authorizes all five of its effects.** They happen in one run, from
+one manual dispatch, and there is no partial form of it:
+
+1. a **GitHub release** on `kevinpinscoe/bao-policy-editor`, with its signed artifacts;
+2. a **Homebrew cask** pushed to `kevinpinscoe/homebrew-tap`;
+3. a **Scoop manifest** pushed to `kevinpinscoe/scoop-bucket`;
+4. an **APT repository dispatch** to `kevinpinscoe/apt`, which rebuilds its index;
+5. an **RPM repository dispatch** to `kevinpinscoe/rpm`, which rebuilds its index.
+
+Once other machines have fetched any of it, none of it can be quietly undone.
 
 **Do not run this without Kevin's explicit authorization for the specific version.**
 
@@ -695,35 +703,154 @@ quietly undone once other machines have fetched it.
 
 | | |
 | --- | --- |
-| The three secrets exist | `gh secret list --repo kevinpinscoe/bao-policy-editor` shows `HOMEBREW_TAP_TOKEN`, `SCOOP_BUCKET_TOKEN`, `REPO_DISPATCH_TOKEN` |
+| The three secrets exist | `gh secret list --repo kevinpinscoe/bao-policy-editor` shows `HOMEBREW_TAP_TOKEN`, `SCOOP_BUCKET_TOKEN`, `REPO_DISPATCH_TOKEN` — names only; values are never readable |
 | CI is green on the commit being tagged | `gh run list --branch main --limit 1` |
 | The dry run passes | Step 17 below |
 | `main` is what you think it is | `git log -1`, and the working tree is clean |
+| `Publish Release` is active and `Release` is disabled | `gh workflow list --repo kevinpinscoe/bao-policy-editor --all` |
+
+The workflow re-checks the first of those itself and refuses to build without it, but
+finding out here costs a minute rather than a failed run.
+
+**Publishing is dispatched, not triggered by the tag.** Pushing the tag does nothing on its
+own — the old tag-triggered `Release` workflow is permanently disabled, because GitHub runs
+a `push` workflow from the definition in the commit being tagged, which would let an older
+commit bypass every check below. Do not re-enable `Release`.
+
+`Publish Release` is started by a **`repository_dispatch`**, which GitHub always runs from
+the default branch. That is deliberate and is not interchangeable with `workflow_dispatch`:
+`gh workflow run --ref <anything>` lets the caller pick which ref the workflow *definition*
+comes from, so "the checks on `main` are the ones that run" would be a convention rather
+than an enforced property. A repository dispatch has no such knob.
+
+#### Tag it, and verify the tag before it leaves the machine
 
 ```bash
 git checkout main && git pull --ff-only origin main
 git tag -s v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
-gh run watch "$(gh run list --workflow=Release --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+git verify-tag v0.1.0
 ```
 
-The tag is **SSH-signed** — `-s`, using the machine's configured signing key — and is never
-moved once pushed.
+`git verify-tag` is the check worth making locally: a tag created without a working signing
+setup is still a perfectly good tag, and the failure would otherwise surface only after the
+push, in the workflow's preflight, with the tag already public. Do not push until it passes.
 
-**Afterwards, verify rather than assume:**
+```bash
+git push origin v0.1.0
+```
+
+Pushing the tag publishes nothing by itself. It only makes the tag available for the
+dispatch below, and it is the last reversible moment: a tag that has not been dispatched
+can still be deleted without anything having been released.
+
+#### Dispatch the publish, and watch the exact run it started
+
+```bash
+TAG=v0.1.0
+REPO=kevinpinscoe/bao-policy-editor
+
+# A unique id for THIS dispatch. It travels in the payload and appears in the
+# run's display title, which is the only reliable way to identify the run a
+# particular dispatch created.
+REQUEST_ID="$(uuidgen)"
+
+# The default-branch commit the workflow definition will be read from. A
+# repository dispatch always runs from the default branch, so this is what the
+# run's head SHA must turn out to be.
+MAIN_SHA=$(gh api "repos/${REPO}/commits/main" --jq '.sha')
+
+echo "request id: ${REQUEST_ID}"
+echo "main sha:   ${MAIN_SHA}"
+
+gh api "repos/${REPO}/dispatches" \
+  --method POST \
+  --field event_type=publish-release \
+  --field client_payload[tag]="${TAG}" \
+  --field client_payload[request_id]="${REQUEST_ID}"
+```
+
+Then find the run whose title carries that exact request id, and prove it is the right kind
+of run before watching it:
+
+```bash
+RUN_ID=""
+for _ in $(seq 1 30); do
+  RUN_ID=$(gh run list --repo "${REPO}" --workflow="Publish Release" \
+    --event=repository_dispatch --limit 50 \
+    --json databaseId,displayTitle,headSha,event \
+    --jq "[.[] | select(.displayTitle | contains(\"${REQUEST_ID}\"))] | first | .databaseId")
+  [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] && break
+  sleep 10
+done
+
+[ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] || {
+  echo "no Publish Release run carrying ${REQUEST_ID} appeared within five minutes"; exit 1; }
+
+# Confirm it really is a repository dispatch, and that it ran from the
+# default-branch commit expected above.
+gh run view "${RUN_ID}" --repo "${REPO}" --json event,headSha \
+  --jq 'if .event == "repository_dispatch" then "event ok" else error("wrong event: " + .event) end'
+RUN_SHA=$(gh run view "${RUN_ID}" --repo "${REPO}" --json headSha --jq '.headSha')
+[ "${RUN_SHA}" = "${MAIN_SHA}" ] || {
+  echo "run ${RUN_ID} ran from ${RUN_SHA}, expected ${MAIN_SHA}"; exit 1; }
+
+gh run watch "${RUN_ID}" --repo "${REPO}" --exit-status
+```
+
+**Why the request id rather than "the newest run".** A dispatched run cannot be identified
+by tag: its `headBranch` and `headSha` are the default branch's, because that is where the
+workflow definition came from. Selecting the newest `Publish Release` run is ambiguous the
+moment two dispatches overlap, and a run takes a moment to appear — in that window the
+newest run is the *previous* release, which would report a long-finished success and say
+nothing about the release in flight. Matching the request id in the run title identifies one
+specific dispatch; checking the event and head SHA confirms it is the kind of run it claims
+to be. The bounded loop fails rather than hanging if no run ever appears.
+
+#### What the run itself re-checks
+
+Preflight records two immutable identities — the annotated tag object's SHA and the commit
+it dereferences to — and publishes nothing. The publishing job checks out that **commit
+SHA**, never the tag name, and re-verifies both identities before GoReleaser starts. If the
+tag has been moved or recreated in between, the run stops there. There is no fallback that
+accepts a moved tag, by design: the only correct response is to refuse.
+
+#### Afterwards, verify rather than assume
 
 ```bash
 gh release view v0.1.0 --repo kevinpinscoe/bao-policy-editor
 # then the verification in README.md's "Verifying a release"
 ```
 
-Check that the cask landed in `kevinpinscoe/homebrew-tap`, the manifest in
-`kevinpinscoe/scoop-bucket`, and that the `apt` and `rpm` repositories ran their
-`add-package.yml`. A dispatch that silently failed leaves a release nobody can install.
+Check all five effects landed: the release, the cask in `kevinpinscoe/homebrew-tap`, the
+manifest in `kevinpinscoe/scoop-bucket`, and an `add-package.yml` run in each of
+`kevinpinscoe/apt` and `kevinpinscoe/rpm`. A dispatch that silently failed leaves a release
+nobody can install.
 
-**If it fails partway:** the release is either complete or it is not. Do not leave a draft
-advertised as final, and do not hand-upload a missing asset to paper over a failed run —
-the checksums and signature would no longer describe what was published.
+#### If it fails partway
+
+The release is either complete or it is not. Do not leave a draft advertised as final, and
+do not hand-upload a missing asset to paper over a failed run — the checksums and signature
+would no longer describe what was published.
+
+**Correct a bad release with a new patch version, never by retagging.** A moved tag means
+the artifacts someone already downloaded no longer match the tag they came from, and the
+Sigstore certificate still attests the original. Delete the GitHub release and its assets
+if they are wrong, leave the tag where it is, fix the problem on `main`, and cut the next
+version.
+
+#### Pinned tool versions
+
+The release toolchain is pinned in `.github/workflows/publish-release.yml`, not floating,
+so the toolchain that publishes is the one the dry run rehearsed:
+
+| Tool | Version | Where |
+| --- | --- | --- |
+| GoReleaser | `2.17.1` | `env.GORELEASER_VERSION` |
+| syft | `v1.49.0` | `env.SYFT_VERSION` |
+| cosign | `v3.0.6` | `env.COSIGN_VERSION` |
+
+Keep these in step with what Step 17 is run with locally. Bumping one is a deliberate
+change: re-run the dry run against the new version before a release uses it.
 
 ### Step 17 — Dry run: build everything, publish nothing
 
