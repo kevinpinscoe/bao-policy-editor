@@ -809,6 +809,14 @@ including the rollback path, is RUNBOOK.md Step 16.
 Tags are **SSH-signed** (`git tag -s`) and never moved once pushed. A release that went out
 wrong is corrected by a new patch version, not by retagging.
 
+Before anything is built, the workflow refuses a tag it cannot vouch for: it must be
+annotated rather than lightweight, its signature must be **verified by GitHub**, it must
+resolve to the commit being built, and that commit must be contained in `main`. It also
+proves — read-only, before the first artifact exists — that the three tokens it will need
+at the *end* of the run can actually push where they must. Both checks fail closed, so a
+release cannot get half-published by a credential discovered to be missing after the
+artifacts are already public.
+
 ### Release assets
 
 Downstream automation consumes these names, so they are a contract rather than a detail —
