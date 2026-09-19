@@ -687,7 +687,7 @@ A genuine failure is worth acting on: these are the paths a user touches first.
 **Why:** this is the only irreversible procedure in this runbook.
 
 **Authorizing this step authorizes all five of its effects.** They happen in one run, from
-one pushed tag, and there is no partial form of it:
+one manual dispatch, and there is no partial form of it:
 
 1. a **GitHub release** on `kevinpinscoe/bao-policy-editor`, with its signed artifacts;
 2. a **Homebrew cask** pushed to `kevinpinscoe/homebrew-tap`;
@@ -707,9 +707,16 @@ Once other machines have fetched any of it, none of it can be quietly undone.
 | CI is green on the commit being tagged | `gh run list --branch main --limit 1` |
 | The dry run passes | Step 17 below |
 | `main` is what you think it is | `git log -1`, and the working tree is clean |
+| `Publish Release` is active and `Release` is disabled | `gh workflow list --repo kevinpinscoe/bao-policy-editor --all` |
 
 The workflow re-checks the first of those itself and refuses to build without it, but
 finding out here costs a minute rather than a failed run.
+
+**Publishing is dispatched, not triggered by the tag.** Pushing the tag does nothing on its
+own — the old tag-triggered `Release` workflow is permanently disabled, because GitHub runs
+a `push` workflow from the definition in the commit being tagged, which would let an older
+commit bypass every check below. `Publish Release` is dispatched from `main`, so the checks
+always run in their current form. Do not re-enable `Release`.
 
 #### Tag it, and verify the tag before it leaves the machine
 
@@ -727,33 +734,49 @@ push, in the workflow's preflight, with the tag already public. Do not push unti
 git push origin v0.1.0
 ```
 
-#### Watch the run that this tag actually started
+Pushing the tag publishes nothing by itself. It only makes the tag available for the
+dispatch below, and it is the last reversible moment: a tag that has not been dispatched
+can still be deleted without anything having been released.
+
+#### Dispatch the publish, and watch the run it started
 
 ```bash
 TAG=v0.1.0
-SHA=$(git rev-parse "${TAG}^{commit}")
+REPO=kevinpinscoe/bao-policy-editor
 
-# Poll for the run belonging to THIS tag and THIS commit, with a bounded wait.
-RUN_ID=""
+# Remember the newest Publish Release run BEFORE dispatching, so the run this
+# dispatch creates can be told apart from it.
+BEFORE=$(gh run list --repo "${REPO}" --workflow="Publish Release" --limit 1 \
+  --json databaseId --jq '.[0].databaseId // "none"')
+
+gh workflow run "Publish Release" --repo "${REPO}" --ref main -f tag="${TAG}"
+
+# Poll for a run id different from the one recorded above, with a bounded wait.
+RUN_ID="${BEFORE}"
 for _ in $(seq 1 30); do
-  RUN_ID=$(gh run list --workflow=Release --event=push --json databaseId,headBranch,headSha \
-    --jq "[.[] | select(.headBranch==\"${TAG}\" and .headSha==\"${SHA}\")] | first | .databaseId")
-  [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] && break
+  RUN_ID=$(gh run list --repo "${REPO}" --workflow="Publish Release" --limit 1 \
+    --json databaseId --jq '.[0].databaseId // "none"')
+  [ "${RUN_ID}" != "${BEFORE}" ] && [ "${RUN_ID}" != "none" ] && break
   sleep 10
 done
 
-[ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] || {
-  echo "no Release run appeared for ${TAG} at ${SHA} within five minutes"; exit 1; }
+[ "${RUN_ID}" != "${BEFORE}" ] && [ "${RUN_ID}" != "none" ] || {
+  echo "no new Publish Release run appeared within five minutes"; exit 1; }
 
-gh run watch "${RUN_ID}" --exit-status
+gh run watch "${RUN_ID}" --repo "${REPO}" --exit-status
 ```
 
-**Why not `--limit 1`.** An unqualified `--limit 1` returns the most recent Release run,
-which is not necessarily yours: a run can take a moment to appear, and in that window the
-newest run is the *previous* release. Watching it would report a long-finished success and
-say nothing about the release actually in flight. Matching on both the tag and the tagged
-commit removes the ambiguity, and the bounded loop fails rather than hanging if no run ever
-appears.
+**Why the before/after comparison.** A dispatched run cannot be identified by tag the way a
+tag-triggered one could: its `headBranch` is `main` and its `headSha` is main's head, not
+the tag's, because the workflow definition came from `main`. An unqualified `--limit 1`
+would therefore return the most recent run whether or not it is yours — and a run takes a
+moment to appear, so in that window the newest run is the *previous* release. Recording the
+newest id before dispatching and waiting for it to change removes the ambiguity, and the
+bounded loop fails rather than hanging if no run ever appears.
+
+**`--ref main` is not optional.** It selects the branch the workflow *definition* is read
+from. The `tag` input selects the code that gets built. Dispatching from anything other
+than `main` would run a workflow definition that has not been reviewed.
 
 #### Afterwards, verify rather than assume
 
@@ -781,8 +804,8 @@ version.
 
 #### Pinned tool versions
 
-The release toolchain is pinned in `.github/workflows/release.yml`, not floating, so the
-toolchain that publishes is the one the dry run rehearsed:
+The release toolchain is pinned in `.github/workflows/publish-release.yml`, not floating,
+so the toolchain that publishes is the one the dry run rehearsed:
 
 | Tool | Version | Where |
 | --- | --- | --- |

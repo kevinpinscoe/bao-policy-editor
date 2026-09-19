@@ -1,38 +1,39 @@
-name: Release
+name: Publish Release
 
-# RETIRED AND DISABLED — DO NOT RE-ENABLE. Superseded by
-# `.github/workflows/publish-release.yml` ("Publish Release").
+# Manually dispatched, never triggered by a tag push.
 #
-# Why this file still exists rather than being deleted: GitHub runs a
-# `push`-triggered workflow from the definition in the commit being tagged.
-# A tag placed on a commit from before the hardening would therefore run
-# *that commit's* copy of this workflow and bypass every check added since.
-# Deleting the file on `main` would not change what an older commit contains.
+# WHY THIS IS NOT A TAG-TRIGGERED WORKFLOW
 #
-# What does close that hole is the workflow's disabled state: it is keyed to
-# the numeric workflow id (362139186), which follows this file path, and it
-# applies no matter which commit a tag points at. This workflow was disabled
-# manually on 2026-09-19 and must stay that way. Keeping the file is what
-# keeps the id — and therefore the disable — in existence.
+# GitHub runs a `push`-triggered workflow from the definition present in the
+# commit being tagged, not from the definition on `main`. A tag placed on an
+# older commit therefore executes that commit's historical workflow — and
+# every preflight check added afterwards is silently bypassed. Hardening a
+# tag-triggered release workflow cannot protect the tags that matter most:
+# the ones pointing at commits that predate the hardening.
 #
-# Releases are now published by dispatching "Publish Release" from `main`
-# with the tag as an input. See RUNBOOK.md Step 16.
+# `workflow_dispatch` inverts that. The workflow definition always comes from
+# the branch it is dispatched from (`main`), while the *code being built*
+# comes from the tag given below. The checks below therefore run in their
+# current form no matter how old the tagged commit is.
+#
+# The previous tag-triggered workflow, `.github/workflows/release.yml`
+# (numeric id 362139186), is retained but **disabled manually** so that no
+# historical commit can start it. Workflow state is keyed to the numeric id,
+# which follows the file path, so disabling it covers every commit in the
+# repository's history. Do not re-enable it.
 
-# Triggered only by a semantic-version tag. Nothing here runs on a pull
-# request, a branch push, or a fork — which is what keeps the secrets below out
-# of reach of anyone who can open a pull request, since a fork cannot push a
-# tag to this repository.
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Signed, annotated tag to publish, e.g. v0.1.0"
+        required: true
+        type: string
 
-# Least privilege, and nothing more. contents:write creates the release and
-# uploads its assets; id-token:write is what lets cosign obtain a short-lived
-# Sigstore certificate from GitHub's OIDC provider.
-permissions:
-  contents: write
-  id-token: write
+# Nothing by default. Each job below grants itself exactly what it needs and
+# no more, so the job that merely inspects a tag cannot write to the
+# repository.
+permissions: {}
 
 # Pinned once, used everywhere, and documented in RUNBOOK.md. A release built
 # by a different toolchain than the one its dry run used is a release nobody
@@ -45,31 +46,54 @@ env:
 
 jobs:
   # Everything that can refuse happens here, before a single artifact exists.
-  # Both checks below are fail-closed: the job exits non-zero on anything it
+  # Every check below is fail-closed: the job exits non-zero on anything it
   # cannot positively confirm, and `release` will not start.
   preflight:
     name: Verify the tag and the credentials
     runs-on: ubuntu-latest
+    permissions:
+      # Read-only. This job inspects; it never publishes.
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The tag names the code to inspect. The workflow itself still comes
+          # from the dispatching branch — that separation is the whole point.
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
 
       # --- the tag -----------------------------------------------------
       #
-      # A tag is the only authorization this pipeline has: pushing one
-      # publishes a release and notifies four other repositories. So the tag
-      # is checked rather than trusted. Four separate properties, each able to
+      # A tag is the only authorization this pipeline has: publishing one
+      # creates a release and notifies four other repositories. So the tag is
+      # checked rather than trusted. Five separate properties, each able to
       # stop the run on its own.
-      - name: Verify the triggering tag
+      - name: Verify the requested tag
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
+          echo "::group::Tag shape"
+          # 0. The shape is a semantic version tag. The old `on: push: tags:`
+          #    filter enforced this for free; a free-text dispatch input does
+          #    not, so it is now an explicit check. Without it the input could
+          #    name a branch, an arbitrary ref, or a tag of any shape.
+          #    The pattern is the exact equivalent of the retired trigger's
+          #    `v[0-9]+.[0-9]+.[0-9]+` filter.
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'${TAG}' is not a vMAJOR.MINOR.PATCH tag. Releases are cut from semantic-version tags only."
+            exit 1
+          fi
+          echo "${TAG} is a well-formed semantic-version tag"
+          echo "::endgroup::"
+
           echo "::group::Tag object"
+          # Make sure the tag ref itself is present locally, not merely the
+          # commit it points at.
+          git fetch --no-tags --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+
           # 1. Annotated, not lightweight. A lightweight tag is a bare ref with
           #    no object of its own — it carries no tagger, no message and
           #    nothing that can be signed, so the remaining checks would have
@@ -93,22 +117,27 @@ jobs:
             exit 1
           fi
 
-          # 3. It ultimately points at the commit being built. An annotated tag
-          #    can point at another tag, or at a tree or blob; ^{commit}
-          #    resolves the whole chain. If this disagreed with the checked-out
-          #    SHA, the release would carry a version that names one commit and
-          #    contents from another.
+          # 3. It ultimately points at the commit that was actually checked
+          #    out. An annotated tag can point at another tag, or at a tree or
+          #    blob; ^{commit} resolves the whole chain.
+          #
+          #    NOTE: this compares against `git rev-parse HEAD`, not
+          #    ${{ github.sha }}. Under workflow_dispatch, github.sha is the
+          #    head of the *dispatching branch* (main), not the tag — using it
+          #    here would compare the tag against main and fail every release
+          #    cut from anything but the tip.
           tagged_commit=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          checked_out=$(git rev-parse HEAD)
           echo "tag resolves to: ${tagged_commit}"
-          echo "checked out:     ${HEAD_SHA}"
-          if [ "${tagged_commit}" != "${HEAD_SHA}" ]; then
-            echo "::error::${TAG} resolves to ${tagged_commit}, but this run checked out ${HEAD_SHA}."
+          echo "checked out:     ${checked_out}"
+          if [ "${tagged_commit}" != "${checked_out}" ]; then
+            echo "::error::${TAG} resolves to ${tagged_commit}, but this run checked out ${checked_out}."
             exit 1
           fi
 
           # 4. That commit is on the default branch. This is what stops a
           #    release being cut from a branch that was never reviewed or
-          #    merged — a tag can be pushed from any local commit at all.
+          #    merged — a tag can be created on any local commit at all.
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           if ! git merge-base --is-ancestor "${tagged_commit}" origin/main; then
             echo "::error::${tagged_commit} is not contained in origin/main. Release only from merged commits."
@@ -117,7 +146,7 @@ jobs:
           echo "${tagged_commit} is contained in origin/main"
           echo "::endgroup::"
 
-          echo "Tag ${TAG} accepted: annotated, verified, resolves to the built commit, and merged."
+          echo "Tag ${TAG} accepted: well-formed, annotated, verified, resolves to the built commit, and merged."
 
       # --- the credentials ----------------------------------------------
       #
@@ -150,7 +179,7 @@ jobs:
             fi
           done
           [ "${missing}" -eq 0 ] || {
-            echo "::error::Set the missing secrets before tagging. See RUNBOOK.md Step 16."
+            echo "::error::Set the missing secrets before publishing. See RUNBOOK.md Step 16."
             exit 1
           }
 
@@ -186,9 +215,16 @@ jobs:
     name: Build, sign and publish
     needs: preflight
     runs-on: ubuntu-latest
+    permissions:
+      # contents:write creates the release and uploads its assets;
+      # id-token:write is what lets cosign obtain a short-lived Sigstore
+      # certificate from GitHub's OIDC provider.
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag }}
           # GoReleaser builds release notes from the commit range since the
           # previous tag, so it needs the whole history, not a shallow clone.
           fetch-depth: 0
@@ -227,7 +263,7 @@ jobs:
             --method POST \
             --field event_type=new-release \
             --field client_payload[repo]="${{ github.repository }}" \
-            --field client_payload[tag]="${{ github.ref_name }}"
+            --field client_payload[tag]="${{ inputs.tag }}"
         env:
           GH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}
 
@@ -237,6 +273,6 @@ jobs:
             --method POST \
             --field event_type=new-release \
             --field client_payload[repo]="${{ github.repository }}" \
-            --field client_payload[tag]="${{ github.ref_name }}"
+            --field client_payload[tag]="${{ inputs.tag }}"
         env:
           GH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}

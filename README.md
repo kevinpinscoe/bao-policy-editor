@@ -800,11 +800,21 @@ verified, but no tag exists, so there is nothing to download. Build from source 
 ### How a release is made
 
 Releases are produced by GoReleaser from a signed semantic-version tag, and by nothing
-else. Pushing `vMAJOR.MINOR.PATCH` — and only that pattern — triggers
-`.github/workflows/release.yml`, which builds every supported target, generates SBOMs,
-signs `checksums.txt` with Cosign, publishes the GitHub release, pushes a Homebrew cask
-and a Scoop manifest, and notifies the APT and RPM repositories. The full procedure,
-including the rollback path, is RUNBOOK.md Step 16.
+else. Publishing is **manually dispatched** rather than triggered by the tag push:
+`.github/workflows/publish-release.yml` ("Publish Release") is run from `main` with the
+tag as an input. It builds every supported target, generates SBOMs, signs `checksums.txt`
+with Cosign, publishes the GitHub release, pushes a Homebrew cask and a Scoop manifest,
+and notifies the APT and RPM repositories. The full procedure, including the rollback
+path, is RUNBOOK.md Step 16.
+
+**Why dispatch rather than a tag trigger.** GitHub runs a `push`-triggered workflow from
+the definition present in the commit being tagged, not the one on `main`. Tagging an older
+commit would therefore run that commit's historical workflow and bypass every check added
+since — exactly the tags where the checks matter most. Dispatching from `main` means the
+workflow definition is always current while the code built is the tag's. The former
+tag-triggered workflow, `.github/workflows/release.yml`, is retained but permanently
+disabled; its disabled state is keyed to the workflow id, so it cannot be started from any
+commit in the repository's history.
 
 Tags are **SSH-signed** (`git tag -s`) and never moved once pushed. A release that went out
 wrong is corrected by a new patch version, not by retagging.
@@ -843,18 +853,25 @@ The package is `bao-policy-editor`; the binary it installs is `bpe`. Intel macOS
 verifying the bundle and then the checksums establishes the whole set. Signing is
 **keyless**: there is no public key to fetch and no private key in existence. What is
 asserted instead is the identity recorded in the short-lived certificate — the workflow
-that built it, the tag it built from, and GitHub as the OIDC issuer:
+that built it, the ref that workflow ran from, and GitHub as the OIDC issuer:
 
 ```bash
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp \
-    'https://github.com/kevinpinscoe/bao-policy-editor/.github/workflows/release.yml@refs/tags/v.*' \
+  --certificate-identity \
+    'https://github.com/kevinpinscoe/bao-policy-editor/.github/workflows/publish-release.yml@refs/heads/main' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   checksums.txt
 
 sha256sum --ignore-missing -c checksums.txt
 ```
+
+The identity ends in `@refs/heads/main`, not `@refs/tags/v...`, because the publishing
+workflow is dispatched from `main` rather than started by the tag. That makes it an exact
+string rather than a pattern, so `--certificate-identity` is used instead of
+`--certificate-identity-regexp`. Releases signed by the retired tag-triggered workflow
+would carry the old `release.yml@refs/tags/v*` identity — there are none, since no release
+was ever published by it.
 
 A `Verified OK` from the first command means the checksums file genuinely came from this
 repository's release workflow. Anything else — including a bundle that verifies against a
