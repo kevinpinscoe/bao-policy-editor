@@ -24,10 +24,15 @@
     // the front matter, which leaves the rule doing its real job — catching two
     // actual H1s in the body — rather than switching it off.
     //
-    // The shared developer config does not carry this option, so a local
-    // `mdlint RUNBOOK.md` invoked through the alias still reports that one
-    // MD025. That single finding is expected, is the preserved convention, and
-    // is the only place this config and the shared one disagree.
+    // The shared config carries the same option (it was added there on
+    // 2026-09-19 for the same reason, across every k-fed runbook), so this is a
+    // mirror rather than a divergence. It is repeated here because CI cannot
+    // read a file out of a developer's home directory.
+    //
+    // The shared config additionally sets MD024.siblings_only, for runbooks that
+    // repeat `### Usage` under many tools. Nothing in this repository needs it,
+    // so it is deliberately not mirrored — this file carries what these three
+    // documents actually require, not a copy of the whole shared ruleset.
     "MD025": { "front_matter_title": "" }
   }
 }

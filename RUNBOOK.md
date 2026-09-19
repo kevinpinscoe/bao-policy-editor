@@ -635,9 +635,24 @@ one the script created and can prove is disposable.
   — `--version`, `--help`, an unknown flag (exit `2`), `validate` clean (`0`) and on a
   syntax error (`1`), `format --check` (`0`), `test` reporting `INCOMPLETE` (`3`), and
   `--remote` with a stray argument (`2`) — each exit code matching the documented contract.
-  **The interactive terminal workflows were not re-driven by hand in that pass**; they were
-  last exercised on 2026-09-17 above, and the width and no-colour cases are additionally
-  asserted by `internal/tui`'s own tests on every run.
+  **The interactive workflows were then driven against that same binary** (2026-09-19, at
+  Kevin's instruction before closing FSM-18): all twelve items of the build brief's manual
+  checklist, through a pseudo-terminal with scripted keystrokes rather than by hand — 19
+  checks, all passing. Covered: starting with no file; opening a valid policy and seeing
+  all three of its rules; opening invalid HCL (reported, no broken editor); adding a rule;
+  toggling all nine capabilities and confirming each reached the generated HCL; the HCL
+  preview; the effective-access screen answering `ALLOWED` and `DENIED`; the unsaved-changes
+  confirmation on quit; saving a new policy to a file and reopening it; an externally
+  modified file refused with the file left untouched; rendering at 40, 60 and 80 columns
+  with nothing written past the right margin; and `NO_COLOR=1` emitting no colour-setting
+  sequences while staying readable, against a colour-on control.
+
+  The driver for that pass is not committed to this repository — it lives with the FSM-18
+  session notes. Four apparent failures in its first run were all defects in the driver
+  itself (a truncated header, two input fields that arrive pre-filled, and a naive
+  line-width measurement that cannot account for cursor motion); **none was a fault in
+  BPE**, which is worth recording because "the checklist failed" and "the thing driving the
+  checklist failed" look identical in a log.
 - **Licensing, verified 2026-09-19:** BPE is MPL-2.0 by its `LICENSE` file. All 42 modules
   in the build graph carry a licence file — 28 MIT, 11 MPL-2.0 (including
   `github.com/openbao/openbao/api/v2` and `github.com/hashicorp/hcl/v2`), 2 Apache-2.0, 1
