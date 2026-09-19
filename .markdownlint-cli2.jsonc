@@ -1,0 +1,38 @@
+{
+  // Mirrors ~/.config/markdownlint/.markdownlint-cli2.jsonc, which is where the
+  // `mdlint` / `mdlint-fix` aliases read their rules from on a developer machine.
+  // It is duplicated here — a few settings, not a ruleset — because continuous
+  // integration has no home directory to read that file from, and CI silently
+  // linting under different rules from the machine the change was written on is
+  // worse than the duplication.
+  //
+  // No top-level "globs" key here, deliberately (KTA-7): markdownlint-cli2 *adds*
+  // a config-level "globs" to the file named on the command line rather than
+  // replacing it, so the key would silently turn `mdlint README.md` into a
+  // repo-wide run — which is how an earlier version of the shared config
+  // auto-fixed files nobody had asked it to touch.
+  "config": {
+    "default": true,
+    "MD013": false,
+    "MD033": false,
+    "MD041": false,
+
+    // RUNBOOK.md carries YAML front matter with a `title:` key *and* its own H1,
+    // which is this project's established convention and is deliberately kept.
+    // MD025 counts a front-matter title as a top-level heading by default and so
+    // reports the pair as two H1s. Clearing front_matter_title stops it counting
+    // the front matter, which leaves the rule doing its real job — catching two
+    // actual H1s in the body — rather than switching it off.
+    //
+    // The shared config carries the same option (it was added there on
+    // 2026-09-19 for the same reason, across every k-fed runbook), so this is a
+    // mirror rather than a divergence. It is repeated here because CI cannot
+    // read a file out of a developer's home directory.
+    //
+    // The shared config additionally sets MD024.siblings_only, for runbooks that
+    // repeat `### Usage` under many tools. Nothing in this repository needs it,
+    // so it is deliberately not mirrored — this file carries what these three
+    // documents actually require, not a copy of the whole shared ruleset.
+    "MD025": { "front_matter_title": "" }
+  }
+}

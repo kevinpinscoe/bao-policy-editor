@@ -17,4 +17,7 @@
 
 # Go build artifacts
 /bpe
+# RUNBOOK.md's documented build target is ./bin/bpe, so following the
+# runbook must not leave an untracked directory behind.
+/bin/
 /dist/

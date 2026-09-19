@@ -90,6 +90,37 @@ connection, whatever `BAO_ADDR` and `BAO_TOKEN` are set to.
 - Network access to an OpenBao server is required only for remote policy operations
 - Remote operations require an OpenBao token with `list` on `sys/policies/acl`, `read` on `sys/policies/acl/*`, `create` or `update` for policy changes, and `delete` for policy deletion
 
+## Supported platforms
+
+BPE is a single static Go binary with no runtime dependencies. Continuous integration
+compiles it for each of these on every pull request, so a build regression on any of them
+fails the pull request rather than being discovered later:
+
+| Operating system | Architecture | Status |
+| --- | --- | --- |
+| Linux | `amd64` | Built in CI; developed and exercised here |
+| Linux | `arm64` | Built in CI |
+| macOS | `arm64` | Built in CI (Apple silicon) |
+| Windows | `amd64` | Built in CI |
+
+**Compiled is not the same as exercised**, and the gap is widest at the bottom of that
+table. Every target is compiled on each pull request, so a build regression fails the pull
+request. Only Linux is actually *run*: the interactive checklist
+([RUNBOOK.md](RUNBOOK.md) Step 15) and the live OpenBao smoke test are executed there.
+
+On **macOS** nothing beyond the build is checked. If the interface misbehaves there, that
+is worth an issue — it has not been ruled out.
+
+On **Windows** treat it as untried. The binary compiles, and that is the whole of the
+claim. Terminal handling, the signal-derived cancellation path, and the atomic write with
+its permission preservation and hard-link detection all assume POSIX behaviour, and none of
+it has been reviewed — the hard-link check is explicitly skipped where it is unavailable
+(see [File writes](#file-writes)). Reports are welcome; do not assume the file-safety
+guarantees documented here hold there.
+
+**Intel macOS (`darwin/amd64`) is not built.** It is not a target rather than a known
+failure; say so in an issue if you need it.
+
 ## CLI Reference
 
 ```text
@@ -734,6 +765,11 @@ OpenBao API ─────┘
 
 - Create focused branches and keep parsing, evaluator, API, and TUI changes separated where practical.
 - Run `go fmt ./...`, `go vet ./...`, and `go test ./...` before submitting a pull request.
+- Continuous integration runs the same checks on every pull request and on `main`, plus
+  `go test -race ./...`, a `go mod tidy` no-op check, the cross-compile matrix, and
+  Markdown lint over `README.md`, `RUNBOOK.md` and `SECURITY.md`. CI contacts no OpenBao
+  server: the one test that does is behind a build tag CI never sets — see
+  [Testing](#testing).
 
 ## Testing
 
@@ -745,10 +781,31 @@ OpenBao API ─────┘
 - `internal/tui` is tested by driving the root model's `Update` with synthesized key presses, exactly as the runtime would: navigation, applying and cancelling a form, add, duplicate, remove-with-confirmation, quit-with-unsaved-changes, the save review, an external-change conflict with the edits retained, and a read-only document refusing every editing action. No test needs a TTY, and none touches a file outside its own `t.TempDir()`.
 - Every screen is rendered at 40, 60 and 100 columns and asserted not to emit a line wider than the terminal.
 - `internal/baoclient` pins its two security properties rather than describing them: the token appears in no error across every failure path and every operation — including when the server echoes it back, parseably or not — in no formatting verb on the client, in no log output, and in nothing written to disk; and the package imports nothing terminal-related, checked by parsing its own imports.
+- **One test does contact a server, and it is opt-in twice over.**
+  `internal/tui/live_smoke_test.go` sits behind the `livesmoke` build tag, so
+  `go test ./...` never compiles it, and CI never sets that tag. Compiled, it still skips
+  unless its own environment variables are set, and refuses outright any address that is
+  not loopback. It exists because one question cannot be answered by a fake: BPE adopts the
+  version from its post-write read-back only if the policy read back is byte-for-byte what
+  it wrote, so any server-side normalization of a stored policy would break every second
+  consecutive save. Run it with `bash scripts/live-smoke.sh`, which stands up a disposable
+  in-memory OpenBao and refuses to proceed against anything else — see RUNBOOK.md Step 14.
 
 ## Build and Release
 
-Releases are planned as cross-platform binaries using GoReleaser.
+**There is no release yet, and no published binary.** BPE is experimental, no version has
+been tagged, and nothing is distributed through a package manager. Build it from source —
+[Quick Start](#quick-start) — or not at all.
+
+What exists today is the *build* half. Continuous integration cross-compiles `cmd/bpe` for
+every supported target on each pull request (see
+[Supported platforms](#supported-platforms)), so the claim that this repository can produce
+cross-platform binaries is checked rather than asserted. Those builds are compile checks;
+they produce no artifact to download.
+
+Packaging and signing — GoReleaser, checksums, signed archives, deb/rpm, Homebrew — are
+deliberately not configured. They belong with the first tagged release, which is a separate
+decision, not a side effect of a merge.
 
 ## Deployment
 
@@ -772,9 +829,16 @@ Three limits of the editor worth knowing before you meet them:
 
 ## Security
 
-Do not report suspected security vulnerabilities in a public issue. Use GitHub's private vulnerability reporting feature when available. BPE processes authentication tokens and authorization policies; diagnostic output and bug reports must not contain tokens, credentials, or secret values.
+**Report suspected vulnerabilities privately** — see [SECURITY.md](SECURITY.md), which
+carries the reporting route, what must never appear in a report, and what BPE does with a
+token. Do not open a public issue for a suspected vulnerability.
 
-A dedicated `SECURITY.md` can be added before the first public release.
+BPE handles authentication tokens and authorization policies, so a bug report or a
+diagnostic excerpt must not contain tokens, credentials, or secret values. If you think one
+has already been exposed, revoke it before writing the report.
+
+What the program itself does with a credential is described in
+[Security behavior](#security-behavior) above and summarized in `SECURITY.md`.
 
 ## Ownership and Support
 
@@ -783,6 +847,7 @@ Bao Policy Editor is currently maintained by Kevin Inscoe. Community issues and 
 ## Related Documentation
 
 - [Runbook](RUNBOOK.md)
+- [Security policy](SECURITY.md)
 
 ## License
 
