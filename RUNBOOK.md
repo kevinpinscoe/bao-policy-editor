@@ -682,6 +682,107 @@ A genuine failure is worth acting on: these are the paths a user touches first.
 
 ---
 
+### Step 16 — Cut a release
+
+**Why:** this is the only irreversible procedure in this runbook. A pushed tag publishes a
+GitHub release, pushes a cask to `homebrew-tap` and a manifest to `scoop-bucket`, and fires
+`repository_dispatch` at `apt` and `rpm`, which rebuild their indexes. None of that can be
+quietly undone once other machines have fetched it.
+
+**Do not run this without Kevin's explicit authorization for the specific version.**
+
+**Preconditions, all of them:**
+
+| | |
+| --- | --- |
+| The three secrets exist | `gh secret list --repo kevinpinscoe/bao-policy-editor` shows `HOMEBREW_TAP_TOKEN`, `SCOOP_BUCKET_TOKEN`, `REPO_DISPATCH_TOKEN` |
+| CI is green on the commit being tagged | `gh run list --branch main --limit 1` |
+| The dry run passes | Step 17 below |
+| `main` is what you think it is | `git log -1`, and the working tree is clean |
+
+```bash
+git checkout main && git pull --ff-only origin main
+git tag -s v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+gh run watch "$(gh run list --workflow=Release --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+```
+
+The tag is **SSH-signed** — `-s`, using the machine's configured signing key — and is never
+moved once pushed.
+
+**Afterwards, verify rather than assume:**
+
+```bash
+gh release view v0.1.0 --repo kevinpinscoe/bao-policy-editor
+# then the verification in README.md's "Verifying a release"
+```
+
+Check that the cask landed in `kevinpinscoe/homebrew-tap`, the manifest in
+`kevinpinscoe/scoop-bucket`, and that the `apt` and `rpm` repositories ran their
+`add-package.yml`. A dispatch that silently failed leaves a release nobody can install.
+
+**If it fails partway:** the release is either complete or it is not. Do not leave a draft
+advertised as final, and do not hand-upload a missing asset to paper over a failed run —
+the checksums and signature would no longer describe what was published.
+
+### Step 17 — Dry run: build everything, publish nothing
+
+**Why:** every part of Step 16 except the publishing, so a broken pipeline is found before
+a tag exists rather than after.
+
+```bash
+goreleaser check
+goreleaser build --snapshot --clean
+goreleaser release --snapshot --clean --skip=sign
+```
+
+`--skip=sign` is required locally: Cosign keyless signing needs a GitHub OIDC token that
+exists only inside Actions, and without one it falls back to an interactive browser flow.
+Signing is therefore exercised only in CI, and the *verification* side can be rehearsed
+against any already-published release in this ecosystem.
+
+**Then inspect what it produced:**
+
+```bash
+dpkg-deb -c  dist/bao-policy-editor_*_linux_amd64.deb   # expect ./usr/bin/bpe
+dpkg-deb -I  dist/bao-policy-editor_*_linux_amd64.deb
+rpm -qlp     dist/bao-policy-editor_*_linux_amd64.rpm   # expect /usr/bin/bpe
+rpm -qip     dist/bao-policy-editor_*_linux_amd64.rpm   # expect License: MPL-2.0
+```
+
+**Two things that look wrong and are not.**
+
+`sha256sum -c checksums.txt` inside `dist/` reports `bpe-linux-amd64`,
+`bpe-linux-arm64` and `bpe-darwin-arm64` as missing. They are not missing and the checksums
+are not wrong. With `formats: [binary]`, GoReleaser uploads each binary from its build
+subdirectory (`dist/bpe_linux_amd64_v1/bpe`) under the archive name, rather than copying it
+into `dist/` under that name — so the published layout and the local layout differ. Confirm
+a checksum directly instead:
+
+```bash
+grep ' bpe-linux-amd64$' dist/checksums.txt
+sha256sum dist/bpe_linux_amd64_v1/bpe
+```
+
+And a snapshot's version reads `0.0.0-SNAPSHOT-<sha>`, with the generated cask and manifest
+pointing at a `v0.0.0` URL that does not exist. That is what a snapshot is: no tag, so no
+version and no real download URL.
+
+**Version injection is the check worth making every time**, because it is silent when it
+breaks — a release whose `--version` says `dev (commit none, built unknown)` looks fine
+until somebody reports a bug against it:
+
+```bash
+./dist/bpe_linux_amd64_v1/bpe --version
+go version -m dist/bpe_darwin_arm64_v8.0/bpe | grep -- -ldflags
+```
+
+The first runs natively. The other three targets cannot be executed on an x86-64 Linux host
+without qemu binfmt handlers, so `go version -m` — which reports the `-ldflags` actually
+compiled in — is how they are checked.
+
+---
+
 ## Credential Handling
 
 `BAO_TOKEN` and any other `BAO_*` credential-bearing environment variables must never appear in logs, diagnostic output, terminal screenshots, or bug reports. `internal/config.Config` holds the resolved token as a `SensitiveString`, a type whose formatting is redacted under every `fmt` verb (`%v`, `%+v`, `%#v`, `%s`, `%q`) and in error messages; only an explicit `.Reveal()` call returns the raw value, and the sole caller is `internal/baoclient.New`, which needs it to authenticate.

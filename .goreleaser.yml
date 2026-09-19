@@ -1,0 +1,151 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+builds:
+  - id: bpe
+    # Unlike most tools in this ecosystem, BPE's entry point is not the
+    # repository root — the root holds no Go files at all.
+    main: ./cmd/bpe
+    binary: bpe
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      # darwin/amd64 is excluded by house convention: every existing cask in
+      # kevinpinscoe/homebrew-tap is Apple-silicon only. Intel macOS is not a
+      # target rather than a known failure.
+      - goos: darwin
+        goarch: amd64
+      # windows/arm64 is excluded to match metar-tool. Nothing has asked for
+      # it, and an unexercised target is a claim nobody has checked.
+      - goos: windows
+        goarch: arm64
+    # The four surviving combinations — linux/amd64, linux/arm64, darwin/arm64
+    # and windows/amd64 — are exactly the set .github/workflows/ci.yml builds
+    # on every pull request. Keep the two in step.
+    ldflags:
+      # Three variables, not one. cmd/bpe/version.go declares version, commit
+      # and date, and `bpe --version` prints all three; injecting only the
+      # first would leave a release reporting "commit none, built unknown".
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+    env:
+      - CGO_ENABLED=0
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: bpe-archive
+    ids: [bpe]
+    # Assets are named for the binary, not the package: bpe-linux-amd64.
+    # Downstream automation depends on these names — see README.md's
+    # "Release assets" table before changing one.
+    name_template: "bpe-{{ .Os }}-{{ .Arch }}"
+    formats: [binary]
+    format_overrides:
+      # Scoop installs from a zip; a bare .exe asset would not work.
+      - goos: windows
+        formats: [zip]
+
+nfpms:
+  - id: bao-policy-editor-packages
+    # The package is named for the project; the binary inside it is `bpe`.
+    package_name: bao-policy-editor
+    vendor: Kevin P. Inscoe
+    homepage: https://github.com/kevinpinscoe/bao-policy-editor
+    maintainer: Kevin P. Inscoe <kevin.inscoe@gmail.com>
+    description: Terminal editor for OpenBao HCL ACL policies
+    # BPE is MPL-2.0. Every sibling tool in these repositories is MIT, so this
+    # is the field most easily copied wrong — it is not MIT here.
+    license: MPL-2.0
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    ids: [bpe]
+
+# `brews:` was deprecated in GoReleaser v2.10 and is slated for removal in
+# v2.16. Casks cover Linux as well as macOS since Homebrew/brew#19121 added
+# Linux binary support, so nothing is lost by moving off the formula.
+# There is no cask equivalent of a formula `test do` block.
+# The cask is named for the project; the binary it installs is `bpe`.
+homebrew_casks:
+  - name: bao-policy-editor
+    binaries: [bpe]      # `binary:` singular is deprecated (GoReleaser v2.12.6)
+    repository:
+      owner: kevinpinscoe
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/kevinpinscoe/bao-policy-editor
+    description: Terminal editor for OpenBao HCL ACL policies
+    license: MPL-2.0
+
+scoops:
+  - name: bao-policy-editor
+    repository:
+      owner: kevinpinscoe
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
+    directory: bucket
+    homepage: https://github.com/kevinpinscoe/bao-policy-editor
+    description: Terminal editor for OpenBao HCL ACL policies
+    license: MPL-2.0
+
+sboms:
+  # Cataloguing the compiled binaries rather than the source tree: syft reads
+  # the Go build info baked into them, so the SBOM lists what actually
+  # shipped. SBOMs land in checksums.txt, so the cosign signature below covers
+  # them without a second signing step.
+  - id: bpe-sbom
+    artifacts: binary
+
+checksum:
+  name_template: "checksums.txt"
+
+signs:
+  # Keyless Sigstore signing over checksums.txt, which transitively covers
+  # every artifact listed in it. No signing key exists or is created: the
+  # identity is the workflow path, tag ref and OIDC issuer recorded in the
+  # certificate, which is what `cosign verify-blob` asserts. See README.md.
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
+changelog:
+  # Build release notes from GitHub's compare API so entries link to their PRs
+  # instead of printing bare 40-character commit SHAs.
+  use: github
+  sort: asc
+  groups:
+    # Security fixes lead so a reader can tell at a glance whether a release
+    # carries one — this backs the supported-versions promise in SECURITY.md.
+    - title: "⚠️ Security fixes"
+      regexp: '(?i)^.*?(sec|vuln)(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Breaking changes"
+      regexp: '(?i)^.*?[[:word:]]+(\([[:word:]]+\))?!:.+$'
+      order: 1
+    - title: "New features"
+      regexp: '(?i)^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: "Bug fixes"
+      regexp: '(?i)^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: "Other changes"
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - 'Merge pull request'
+      - 'Merge branch'
+
+release:
+  github:
+    owner: kevinpinscoe
+    name: bao-policy-editor
+  name_template: "v{{ .Version }}"
+  make_latest: true
