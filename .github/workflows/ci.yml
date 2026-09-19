@@ -1,0 +1,111 @@
+name: CI
+
+# Runs on every pull request and on the default branch. Nothing here contacts
+# an OpenBao server: the whole suite is fakes and httptest by design, and the
+# one test that does talk to a server is behind the `livesmoke` build tag,
+# which no job below sets. See scripts/live-smoke.sh.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, vet, build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        # gofmt -l prints the files that need formatting and exits 0 either
+        # way, so the check is that it printed nothing.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./cmd/bpe
+
+      - name: go test
+        run: go test ./...
+
+      - name: go mod tidy is a no-op
+        # A tidy that changes go.mod or go.sum means the committed files do not
+        # match the imports, which is the kind of drift that only shows up in
+        # somebody else's build.
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: go test -race
+        run: go test -race ./...
+
+  cross-compile:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: go build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -o /dev/null ./cmd/bpe
+
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: markdownlint
+        # The files are named explicitly rather than globbed. markdownlint-cli2
+        # adds a config-level "globs" to a named target instead of replacing it,
+        # so .markdownlint-cli2.jsonc deliberately carries no "globs" key and
+        # the scope lives here, on the command line, where it is visible.
+        run: npx --yes markdownlint-cli2@0.23.2 README.md RUNBOOK.md SECURITY.md
