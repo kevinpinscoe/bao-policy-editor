@@ -15,8 +15,9 @@ name: Release
 # manually on 2026-09-19 and must stay that way. Keeping the file is what
 # keeps the id — and therefore the disable — in existence.
 #
-# Releases are now published by dispatching "Publish Release" from `main`
-# with the tag as an input. See RUNBOOK.md Step 16.
+# Releases are now published by sending a `publish-release`
+# repository_dispatch, which GitHub always runs from the default branch.
+# See RUNBOOK.md Step 16.
 
 # Triggered only by a semantic-version tag. Nothing here runs on a pull
 # request, a branch push, or a fork — which is what keeps the secrets below out

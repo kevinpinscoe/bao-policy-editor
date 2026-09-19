@@ -715,8 +715,13 @@ finding out here costs a minute rather than a failed run.
 **Publishing is dispatched, not triggered by the tag.** Pushing the tag does nothing on its
 own — the old tag-triggered `Release` workflow is permanently disabled, because GitHub runs
 a `push` workflow from the definition in the commit being tagged, which would let an older
-commit bypass every check below. `Publish Release` is dispatched from `main`, so the checks
-always run in their current form. Do not re-enable `Release`.
+commit bypass every check below. Do not re-enable `Release`.
+
+`Publish Release` is started by a **`repository_dispatch`**, which GitHub always runs from
+the default branch. That is deliberate and is not interchangeable with `workflow_dispatch`:
+`gh workflow run --ref <anything>` lets the caller pick which ref the workflow *definition*
+comes from, so "the checks on `main` are the ones that run" would be a convention rather
+than an enforced property. A repository dispatch has no such knob.
 
 #### Tag it, and verify the tag before it leaves the machine
 
@@ -738,45 +743,76 @@ Pushing the tag publishes nothing by itself. It only makes the tag available for
 dispatch below, and it is the last reversible moment: a tag that has not been dispatched
 can still be deleted without anything having been released.
 
-#### Dispatch the publish, and watch the run it started
+#### Dispatch the publish, and watch the exact run it started
 
 ```bash
 TAG=v0.1.0
 REPO=kevinpinscoe/bao-policy-editor
 
-# Remember the newest Publish Release run BEFORE dispatching, so the run this
-# dispatch creates can be told apart from it.
-BEFORE=$(gh run list --repo "${REPO}" --workflow="Publish Release" --limit 1 \
-  --json databaseId --jq '.[0].databaseId // "none"')
+# A unique id for THIS dispatch. It travels in the payload and appears in the
+# run's display title, which is the only reliable way to identify the run a
+# particular dispatch created.
+REQUEST_ID="$(uuidgen)"
 
-gh workflow run "Publish Release" --repo "${REPO}" --ref main -f tag="${TAG}"
+# The default-branch commit the workflow definition will be read from. A
+# repository dispatch always runs from the default branch, so this is what the
+# run's head SHA must turn out to be.
+MAIN_SHA=$(gh api "repos/${REPO}/commits/main" --jq '.sha')
 
-# Poll for a run id different from the one recorded above, with a bounded wait.
-RUN_ID="${BEFORE}"
+echo "request id: ${REQUEST_ID}"
+echo "main sha:   ${MAIN_SHA}"
+
+gh api "repos/${REPO}/dispatches" \
+  --method POST \
+  --field event_type=publish-release \
+  --field client_payload[tag]="${TAG}" \
+  --field client_payload[request_id]="${REQUEST_ID}"
+```
+
+Then find the run whose title carries that exact request id, and prove it is the right kind
+of run before watching it:
+
+```bash
+RUN_ID=""
 for _ in $(seq 1 30); do
-  RUN_ID=$(gh run list --repo "${REPO}" --workflow="Publish Release" --limit 1 \
-    --json databaseId --jq '.[0].databaseId // "none"')
-  [ "${RUN_ID}" != "${BEFORE}" ] && [ "${RUN_ID}" != "none" ] && break
+  RUN_ID=$(gh run list --repo "${REPO}" --workflow="Publish Release" \
+    --event=repository_dispatch --limit 50 \
+    --json databaseId,displayTitle,headSha,event \
+    --jq "[.[] | select(.displayTitle | contains(\"${REQUEST_ID}\"))] | first | .databaseId")
+  [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] && break
   sleep 10
 done
 
-[ "${RUN_ID}" != "${BEFORE}" ] && [ "${RUN_ID}" != "none" ] || {
-  echo "no new Publish Release run appeared within five minutes"; exit 1; }
+[ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] || {
+  echo "no Publish Release run carrying ${REQUEST_ID} appeared within five minutes"; exit 1; }
+
+# Confirm it really is a repository dispatch, and that it ran from the
+# default-branch commit expected above.
+gh run view "${RUN_ID}" --repo "${REPO}" --json event,headSha \
+  --jq 'if .event == "repository_dispatch" then "event ok" else error("wrong event: " + .event) end'
+RUN_SHA=$(gh run view "${RUN_ID}" --repo "${REPO}" --json headSha --jq '.headSha')
+[ "${RUN_SHA}" = "${MAIN_SHA}" ] || {
+  echo "run ${RUN_ID} ran from ${RUN_SHA}, expected ${MAIN_SHA}"; exit 1; }
 
 gh run watch "${RUN_ID}" --repo "${REPO}" --exit-status
 ```
 
-**Why the before/after comparison.** A dispatched run cannot be identified by tag the way a
-tag-triggered one could: its `headBranch` is `main` and its `headSha` is main's head, not
-the tag's, because the workflow definition came from `main`. An unqualified `--limit 1`
-would therefore return the most recent run whether or not it is yours — and a run takes a
-moment to appear, so in that window the newest run is the *previous* release. Recording the
-newest id before dispatching and waiting for it to change removes the ambiguity, and the
-bounded loop fails rather than hanging if no run ever appears.
+**Why the request id rather than "the newest run".** A dispatched run cannot be identified
+by tag: its `headBranch` and `headSha` are the default branch's, because that is where the
+workflow definition came from. Selecting the newest `Publish Release` run is ambiguous the
+moment two dispatches overlap, and a run takes a moment to appear — in that window the
+newest run is the *previous* release, which would report a long-finished success and say
+nothing about the release in flight. Matching the request id in the run title identifies one
+specific dispatch; checking the event and head SHA confirms it is the kind of run it claims
+to be. The bounded loop fails rather than hanging if no run ever appears.
 
-**`--ref main` is not optional.** It selects the branch the workflow *definition* is read
-from. The `tag` input selects the code that gets built. Dispatching from anything other
-than `main` would run a workflow definition that has not been reviewed.
+#### What the run itself re-checks
+
+Preflight records two immutable identities — the annotated tag object's SHA and the commit
+it dereferences to — and publishes nothing. The publishing job checks out that **commit
+SHA**, never the tag name, and re-verifies both identities before GoReleaser starts. If the
+tag has been moved or recreated in between, the run stops there. There is no fallback that
+accepts a moved tag, by design: the only correct response is to refuse.
 
 #### Afterwards, verify rather than assume
 

@@ -800,21 +800,36 @@ verified, but no tag exists, so there is nothing to download. Build from source 
 ### How a release is made
 
 Releases are produced by GoReleaser from a signed semantic-version tag, and by nothing
-else. Publishing is **manually dispatched** rather than triggered by the tag push:
-`.github/workflows/publish-release.yml` ("Publish Release") is run from `main` with the
-tag as an input. It builds every supported target, generates SBOMs, signs `checksums.txt`
-with Cosign, publishes the GitHub release, pushes a Homebrew cask and a Scoop manifest,
-and notifies the APT and RPM repositories. The full procedure, including the rollback
-path, is RUNBOOK.md Step 16.
+else. Publishing is started by a **`publish-release` repository dispatch** carrying the tag
+and a unique request id — never by the tag push itself.
+`.github/workflows/publish-release.yml` ("Publish Release") builds every supported target,
+generates SBOMs, signs `checksums.txt` with Cosign, publishes the GitHub release, pushes a
+Homebrew cask and a Scoop manifest, and notifies the APT and RPM repositories. The full
+procedure, including the rollback path, is RUNBOOK.md Step 16.
 
-**Why dispatch rather than a tag trigger.** GitHub runs a `push`-triggered workflow from
-the definition present in the commit being tagged, not the one on `main`. Tagging an older
-commit would therefore run that commit's historical workflow and bypass every check added
-since — exactly the tags where the checks matter most. Dispatching from `main` means the
-workflow definition is always current while the code built is the tag's. The former
-tag-triggered workflow, `.github/workflows/release.yml`, is retained but permanently
-disabled; its disabled state is keyed to the workflow id, so it cannot be started from any
-commit in the repository's history.
+**Why a repository dispatch and not a tag trigger.** GitHub runs a `push`-triggered
+workflow from the definition present in the commit being tagged, not the one on the default
+branch. Tagging an older commit would therefore run that commit's historical workflow and
+bypass every check added since — exactly the tags where the checks matter most.
+
+**And not a `workflow_dispatch` either.** That variant lets the caller choose which ref the
+workflow definition is read from (`gh workflow run --ref …`), so "run the checks that are on
+`main`" would be a convention rather than an enforced property. `repository_dispatch` has no
+such knob: GitHub always runs it from the default branch. The tag arrives as payload data
+instead of as a ref.
+
+The former tag-triggered workflow, `.github/workflows/release.yml`, is retained as a
+tombstone and permanently disabled. Its disabled state is keyed to the numeric workflow id,
+which follows the file path, so it cannot be started from any commit in the repository's
+history — and keeping the file is what keeps that id, and therefore the disable, in
+existence.
+
+**The tag is bound by identity, not by name.** Preflight records the annotated tag object's
+SHA and the commit it dereferences to, and publishes nothing itself. The publishing job
+checks out that immutable commit SHA — never the tag name — and re-checks both identities
+before GoReleaser runs. A tag moved or recreated between the two jobs stops the release
+rather than publishing a commit nothing verified. There is no fallback that accepts a moved
+tag.
 
 Tags are **SSH-signed** (`git tag -s`) and never moved once pushed. A release that went out
 wrong is corrected by a new patch version, not by retagging.
