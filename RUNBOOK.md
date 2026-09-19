@@ -14,20 +14,20 @@ source_path: /home/kinscoe/Projects/public/bao-policy-editor/RUNBOOK.md
 
 ## Metadata
 
-| Field                 | Value                                                                                                    |
-| --------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Owner**             | Kevin Inscoe                                                                                             |
-| **Last Updated**      | 2026-09-17                                                                                               |
-| **Last Tested**       | 2026-09-17 — build, CLI, `validate`, `format`, `test`, the interactive editor, and interruption verified |
-| **Expected Duration** | N/A                                                                                                      |
-| **Risk Level**        | Medium                                                                                                   |
-| **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor>                                                      |
+| Field                 | Value                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| **Owner**             | Kevin Inscoe                                                                                   |
+| **Last Updated**      | 2026-09-19                                                                                     |
+| **Last Tested**       | 2026-09-19 — full local suite, four cross-compile targets, Step 15 (19/19), Step 14 live smoke |
+| **Expected Duration** | N/A                                                                                            |
+| **Risk Level**        | Medium                                                                                         |
+| **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor>                                            |
 
 ---
 
 ## Purpose
 
-This runbook covers how to build, run, validate a policy with, format a policy file with, simulate an effective-access check against, edit interactively, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — plus HCL parsing, semantic policy validation (`bpe validate`), safe local-file formatting and persistence (`bpe format`, `internal/fileio`), effective-access simulation (`bpe test`), and the interactive terminal editor (`bpe`, `bpe <policy.hcl>`). The OpenBao client exists as of FSM-16 (`internal/baoclient`) but **no command calls it yet** — joining it to the editor is FSM-17. So connection, TLS and remote-conflict *procedures* still describe nothing a user can run today, and are deliberately not written up as steps here; what the client does and refuses to do is documented in README.md's [Remote policies](README.md#remote-policies) section, and Step 10 below records how to exercise it without a server. Local-file conflict handling (a policy file that changed on disk since it was read) is documented below, in Steps 6 and 8.
+This runbook covers how to build, run, validate a policy with, format a policy file with, simulate an effective-access check against, edit interactively, and safely interrupt Bao Policy Editor (BPE) as it exists today. BPE is **Experimental** (see `README.md`) and currently ships an application foundation — CLI argument parsing, command dispatch, configuration resolution, and signal handling — plus HCL parsing, semantic policy validation (`bpe validate`), safe local-file formatting and persistence (`bpe format`, `internal/fileio`), effective-access simulation (`bpe test`), and the interactive terminal editor (`bpe`, `bpe <policy.hcl>`). **Remote policy editing is live** as of FSM-17 (merge commit `2dd542d`): `bpe --remote`, and `r` from inside the editor, connect to an OpenBao server to list, open, edit, create, update and delete ACL policies, with the endpoint's own check-and-set making an update refuse rather than overwrite somebody else's change. The procedures for it are steps here, not descriptions of something unreachable: Step 11 is working on a server's policies, Step 12 is recovering from a rejected remote write, Step 13 is diagnosing a connection, TLS or authorization failure, and Step 14 is the live smoke test against a disposable server. Step 10 remains the way to exercise the client with no server at all. What the client does and refuses to do is documented in README.md's [Remote policies](README.md#remote-policies) section. Local-file conflict handling (a policy file that changed on disk since it was read) is documented below, in Steps 6 and 8.
 
 ---
 
@@ -591,8 +591,18 @@ part worth reading before you run it, because a great many developer shells alre
   they die with the server either way, but a leftover means a test's cleanup did not run.
 
 The test file adds its own refusal on top: it skips unless `BPE_LIVE_ADDR` and
-`BPE_LIVE_TOKEN` are set, and fails immediately on any address that does not begin
-`http://127.0.0.1:` — checked before a single request is made.
+`BPE_LIVE_TOKEN` are set, and then **parses** the address before a single request is made,
+requiring the `http` scheme, no userinfo, no path, no query, no fragment, a numeric port in
+1–65535, and a host that is a **loopback IP literal**. A hostname is refused even when it
+would resolve to `127.0.0.1`, because what a name resolves to is not fixed.
+
+That guard is parsed rather than prefix-matched for a concrete reason:
+`http://127.0.0.1:8211@openbao.example.com` begins with `http://127.0.0.1:` and resolves to
+`openbao.example.com`, since everything before the `@` is userinfo rather than a host — the
+exact shape that would aim a live write test at a real server while reading, in a diff, like
+a loopback address. A prefix check also wrongly rejected `http://[::1]:8211`. The guard and
+its table of cases live in `internal/tui/livesmoke_guard_test.go`, in an **untagged** file so
+`go test ./...` covers it even though its only caller is behind the build tag.
 
 **It is never run by CI and never by an ordinary test run.** `go test ./...` does not
 compile it; only `-tags livesmoke` does. Confirm that for yourself:
@@ -626,12 +636,21 @@ keystrokes, and reads back what was rendered.
 Run it before a release, and after any change to the editor's screens or key handling.
 
 ```bash
-go build -o ./bin/bpe ./cmd/bpe
 python3 scripts/tui-checklist.py
 ```
 
-Set `BPE_BINARY` to check a binary somewhere else. It needs Python 3 and a POSIX
-pseudo-terminal; nothing else, and no network.
+That is the whole invocation. **It builds `./cmd/bpe` from the current checkout** into a
+temporary directory and checks that binary, then deletes it along with every policy file it
+wrote — on a failure and on a Ctrl+C as well as on a clean run. Building is not an
+optional convenience: a checklist that reused whatever `./bin/bpe` happened to hold could
+pass a release against a binary compiled from an older commit. The run prints the revision
+it built from, and says so when the working tree is dirty.
+
+`BPE_BINARY=/path/to/bpe` checks that artifact instead — for a release candidate, or a
+binary someone sent you. The run announces it in a banner, because the result then
+describes that file rather than this checkout.
+
+It needs Python 3 and a POSIX pseudo-terminal; nothing else, and no network.
 
 **Expected output** ends with:
 
@@ -677,7 +696,8 @@ A genuine failure is worth acting on: these are the paths a user touches first.
 - **Last live smoke test:** 2026-09-18 against a disposable in-memory OpenBao 2.5.2 on loopback — RUNBOOK Step 11. Covered an ordinary policy, one with an explicit `expiration`, one whose expiration came from a `ttl`, and one with `cas_required = true`; each updated through the real TUI with the body changing, the version advancing and the metadata intact. A stale write was provoked with a second client and presented as a conflict rather than a generic failure, the server's version was reviewed, and the deliberate retry succeeded. Every disposable policy was deleted afterwards and no credential reached any file.
 - **Last release-hardening pass:** 2026-09-19 (FSM-18) — CI added covering gofmt, `go vet`,
   `go build`, `go test`, `go test -race`, a `go mod tidy` no-op check, a cross-compile
-  matrix for linux/darwin on amd64/arm64, and Markdown lint; `SECURITY.md` written;
+  matrix for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64, and Markdown lint;
+  `SECURITY.md` written;
   supported platforms and the release position documented; the live smoke harness preserved
   as `scripts/live-smoke.sh` plus a `livesmoke`-tagged test (Step 14) and re-run green from
   the repository. The non-interactive CLI surface was re-exercised against the built binary

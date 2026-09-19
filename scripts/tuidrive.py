@@ -40,6 +40,8 @@ class Tui:
         self.argv = argv
         self.buf = ""
         self.raw = b""
+        self._exit = None
+        self._closed = False
         env = {**os.environ, **(env or {})}
         env.setdefault("TERM", "xterm-256color")
         self.pid, self.fd = pty.fork()
@@ -102,26 +104,60 @@ class Tui:
 
     # --- finishing -----------------------------------------------------
 
-    def close(self, timeout=3.0):
+    def wait_exit(self, timeout=3.0):
+        """The child's exit code if it ends within `timeout`, else None.
+
+        None means "still running" and nothing has been killed, which is what
+        lets a caller tell a process that exited on its own from one this
+        driver had to put down. Those are very different results, and an
+        assertion that cannot tell them apart will call a hung program a
+        passing error path.
+        """
+        if self._exit is not None:
+            return self._exit
         end = time.time() + timeout
-        status = None
         while time.time() < end:
             self.pump(0.1)
-            pid, st = os.waitpid(self.pid, os.WNOHANG)
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
             if pid:
-                status = st
-                break
-        if status is None:
-            try:
-                os.kill(self.pid, signal.SIGKILL)
-                _, status = os.waitpid(self.pid, 0)
-            except ProcessLookupError:
-                status = 0
+                self._exit = os.waitstatus_to_exitcode(status)
+                return self._exit
+        return None
+
+    def close(self, timeout=3.0):
+        """Reap the child, killing it if it overstays. Idempotent.
+
+        Returns its exit code, or the string "killed" if it had to be killed —
+        never a plausible-looking integer for a process that never finished.
+        """
+        if self._closed:
+            return self._exit if self._exit is not None else "killed"
+        code = self.wait_exit(timeout)
+        if code is None:
+            self.kill()
+            code = "killed"
+        self._closed = True
         try:
             os.close(self.fd)
         except OSError:
             pass
-        return os.waitstatus_to_exitcode(status) if status is not None else None
+        return code
+
+    def kill(self):
+        """Put the child down without waiting. Safe to call on a dead process."""
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(self.pid, 0)
+        except (ChildProcessError, OSError):
+            pass
+        self._closed = True
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
 
     def widest_line(self):
         """The longest rendered line, ANSI stripped — for narrow-terminal checks."""

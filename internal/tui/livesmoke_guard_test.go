@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"testing"
 )
 
@@ -46,9 +47,28 @@ func loopbackOnly(addr string) error {
 	if parsed.Path != "" && parsed.Path != "/" {
 		return fmt.Errorf("%q has a path; the address must be a bare host and port", addr)
 	}
+	// "A bare host and port" has to mean it. A query or a fragment is not
+	// something a dev-server address carries, and leaving either unchecked
+	// would make the description above untrue.
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return fmt.Errorf("%q has a query string; the address must be a bare host and port", addr)
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("%q has a fragment; the address must be a bare host and port", addr)
+	}
 	port := parsed.Port()
 	if port == "" {
 		return fmt.Errorf("%q names no port", addr)
+	}
+	// url.Parse rejects some malformed ports outright and accepts others —
+	// "0" and "65536" both parse — so the range is checked here rather than
+	// assumed from the parse having succeeded.
+	number, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("%q has a non-numeric port %q", addr, port)
+	}
+	if number < 1 || number > 65535 {
+		return fmt.Errorf("%q has port %d, outside the valid range 1-65535", addr, number)
 	}
 	host := parsed.Hostname()
 	ip := net.ParseIP(host)
@@ -81,6 +101,14 @@ func TestLoopbackGuardAcceptsOnlyRealLoopbackAddresses(t *testing.T) {
 		{"a trailing slash is still bare", "http://127.0.0.1:8211/", true},
 
 		{"userinfo disguising a real host", "http://127.0.0.1:8211@openbao.example.com", false},
+		{"port 0", "http://127.0.0.1:0", false},
+		{"port 65536, one past the top", "http://127.0.0.1:65536", false},
+		{"the highest valid port", "http://127.0.0.1:65535", true},
+		{"a non-numeric port", "http://127.0.0.1:not-a-port", false},
+		{"a malformed port", "http://127.0.0.1:82 11", false},
+		{"a query string", "http://127.0.0.1:8211?redirect=https://example.com", false},
+		{"a bare question mark", "http://127.0.0.1:8211?", false},
+		{"a fragment", "http://127.0.0.1:8211#openbao.example.com", false},
 		{"userinfo with a password disguising a real host", "http://127.0.0.1:pass@example.com:8200", false},
 		{"a hostname that merely starts with the loopback digits", "http://127.0.0.1.example.com:8200", false},
 		{"a public address", "https://openbao.example.com:8200", false},
