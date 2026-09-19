@@ -88,15 +88,20 @@ def build(into):
     revision = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
     )
+    # --untracked-files=normal, not =no. An untracked .go file inside a package
+    # directory is compiled into the binary just like a tracked one, so hiding
+    # untracked files would let this print "built from <revision>" for a build
+    # that is not that revision — the exact claim this line exists to make.
     dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
+        ["git", "status", "--porcelain", "--untracked-files=normal"],
         cwd=REPO,
         capture_output=True,
         text=True,
     )
     head = revision.stdout.strip() or "unknown"
     if dirty.stdout.strip():
-        head += " (working tree has uncommitted changes)"
+        changed = len(dirty.stdout.strip().splitlines())
+        head += f" (working tree is dirty: {changed} modified or untracked file(s))"
     print(f"checking a binary built from {head}\n")
     return binary
 
