@@ -793,19 +793,64 @@ OpenBao API ─────┘
 
 ## Build and Release
 
-**There is no release yet, and no published binary.** BPE is experimental, no version has
-been tagged, and nothing is distributed through a package manager. Build it from source —
-[Quick Start](#quick-start) — or not at all.
+**No release has been published yet.** The pipeline below is configured and dry-run
+verified, but no tag exists, so there is nothing to download. Build from source —
+[Quick Start](#quick-start) — until the first release is cut.
 
-What exists today is the *build* half. Continuous integration cross-compiles `cmd/bpe` for
-every supported target on each pull request (see
-[Supported platforms](#supported-platforms)), so the claim that this repository can produce
-cross-platform binaries is checked rather than asserted. Those builds are compile checks;
-they produce no artifact to download.
+### How a release is made
 
-Packaging and signing — GoReleaser, checksums, signed archives, deb/rpm, Homebrew — are
-deliberately not configured. They belong with the first tagged release, which is a separate
-decision, not a side effect of a merge.
+Releases are produced by GoReleaser from a signed semantic-version tag, and by nothing
+else. Pushing `vMAJOR.MINOR.PATCH` — and only that pattern — triggers
+`.github/workflows/release.yml`, which builds every supported target, generates SBOMs,
+signs `checksums.txt` with Cosign, publishes the GitHub release, pushes a Homebrew cask
+and a Scoop manifest, and notifies the APT and RPM repositories. The full procedure,
+including the rollback path, is RUNBOOK.md Step 16.
+
+Tags are **SSH-signed** (`git tag -s`) and never moved once pushed. A release that went out
+wrong is corrected by a new patch version, not by retagging.
+
+### Release assets
+
+Downstream automation consumes these names, so they are a contract rather than a detail —
+the APT and RPM workflows glob `*.deb` and `*.rpm`, and the Scoop manifest points at the
+Windows zip by name:
+
+| Asset | Contents |
+| --- | --- |
+| `bpe-linux-amd64`, `bpe-linux-arm64`, `bpe-darwin-arm64` | the bare binary |
+| `bpe-windows-amd64.zip` | the binary, zipped because Scoop installs from an archive |
+| `bao-policy-editor_<version>_linux_<arch>.deb` | installs `/usr/bin/bpe` |
+| `bao-policy-editor_<version>_linux_<arch>.rpm` | installs `/usr/bin/bpe` |
+| `bpe_<version>_<os>_<arch>.sbom.json` | SBOM per binary, catalogued by syft |
+| `checksums.txt` | SHA-256 of every asset above, including the SBOMs |
+| `checksums.txt.sigstore.json` | the Cosign bundle signing `checksums.txt` |
+
+The package is `bao-policy-editor`; the binary it installs is `bpe`. Intel macOS
+(`darwin/amd64`) and `windows/arm64` are deliberately not built — see
+[Supported platforms](#supported-platforms).
+
+### Verifying a release
+
+`checksums.txt` covers every asset, and the Cosign bundle covers `checksums.txt`, so
+verifying the bundle and then the checksums establishes the whole set. Signing is
+**keyless**: there is no public key to fetch and no private key in existence. What is
+asserted instead is the identity recorded in the short-lived certificate — the workflow
+that built it, the tag it built from, and GitHub as the OIDC issuer:
+
+```bash
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp \
+    'https://github.com/kevinpinscoe/bao-policy-editor/.github/workflows/release.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  checksums.txt
+
+sha256sum --ignore-missing -c checksums.txt
+```
+
+A `Verified OK` from the first command means the checksums file genuinely came from this
+repository's release workflow. Anything else — including a bundle that verifies against a
+*different* identity — means do not trust the artifacts.
 
 ## Deployment
 
