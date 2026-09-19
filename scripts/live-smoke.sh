@@ -33,6 +33,17 @@
 set -euo pipefail
 
 PORT="${BPE_SMOKE_PORT:-8211}"
+
+# BPE_SMOKE_PORT is user-supplied and is concatenated into the address every
+# later check is made against, so it is validated as a bare integer before it
+# is used. Without this, BPE_SMOKE_PORT='8211@openbao.example.com' would
+# produce an address that begins "http://127.0.0.1:" and resolves somewhere
+# else entirely — everything before the "@" is userinfo, not a host.
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [[ "$PORT" -lt 1 || "$PORT" -gt 65535 ]]; then
+  echo "FATAL: BPE_SMOKE_PORT must be a port number between 1 and 65535, not '${PORT}'." >&2
+  exit 1
+fi
+
 ADDR="http://127.0.0.1:${PORT}"
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -116,8 +127,13 @@ fi
 
 # --- the guards --------------------------------------------------------
 
-if [[ "$BAO_ADDR" != "http://127.0.0.1:"* ]]; then
-  echo "FATAL: ${BAO_ADDR} is not a loopback address." >&2
+# Re-derive the address from its parts rather than pattern-matching the string:
+# a prefix test on a URL is defeatable by userinfo, which is why PORT is
+# validated above and why the comparison below is against a value this script
+# built itself. The Go side parses the URL properly — see loopbackOnly in
+# internal/tui/livesmoke_guard_test.go.
+if [[ "$BAO_ADDR" != "http://127.0.0.1:${PORT}" ]]; then
+  echo "FATAL: ${BAO_ADDR} is not the loopback address this script constructed." >&2
   exit 1
 fi
 

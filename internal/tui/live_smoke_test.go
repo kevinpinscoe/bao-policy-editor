@@ -72,8 +72,10 @@ func liveEnv(t *testing.T) (addr, token string) {
 	if addr == "" || token == "" {
 		t.Skip("BPE_LIVE_ADDR / BPE_LIVE_TOKEN unset — this test only runs under the smoke harness")
 	}
-	if !strings.HasPrefix(addr, "http://127.0.0.1:") {
-		t.Fatalf("refusing to run against %q — the live smoke test is loopback-only", addr)
+	// The address is parsed rather than pattern-matched — see loopbackOnly in
+	// livesmoke_guard_test.go for why a prefix check is not good enough.
+	if err := loopbackOnly(addr); err != nil {
+		t.Fatalf("refusing to run: %v", err)
 	}
 	return addr, token
 }

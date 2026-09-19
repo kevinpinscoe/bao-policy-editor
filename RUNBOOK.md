@@ -614,6 +614,55 @@ one the script created and can prove is disposable.
 
 ---
 
+### Step 15 — Run the interactive workflow checklist
+
+**Why:** every other test in this repository drives the Bubble Tea model directly, which is
+the right level for almost everything and cannot answer terminal-shaped questions — whether
+anything is written past the right margin at 40 columns, whether `NO_COLOR` is honoured in
+the bytes that actually reach the terminal, whether a prompt that arrives pre-filled behaves
+when someone types into it. This spawns the compiled binary on a pseudo-terminal, sends real
+keystrokes, and reads back what was rendered.
+
+Run it before a release, and after any change to the editor's screens or key handling.
+
+```bash
+go build -o ./bin/bpe ./cmd/bpe
+python3 scripts/tui-checklist.py
+```
+
+Set `BPE_BINARY` to check a binary somewhere else. It needs Python 3 and a POSIX
+pseudo-terminal; nothing else, and no network.
+
+**Expected output** ends with:
+
+```text
+19/19 checks passed
+```
+
+**What it covers** — the twelve items of the build brief's manual checklist: starting with
+no file; opening a valid policy; opening invalid HCL; adding a rule; toggling all nine
+capabilities and confirming each reaches the generated HCL; the HCL preview; the
+effective-access screen answering `ALLOWED` and `DENIED`; the unsaved-changes confirmation
+on quit; saving a new policy and reopening it; an externally modified file refused with the
+file left untouched; rendering at 40, 60 and 80 columns; and `NO_COLOR=1` against a
+colour-on control.
+
+**It is not wired into CI**, deliberately. It is timing-sensitive — it sends a keystroke,
+waits for a frame, and asserts on what arrived — and a check that goes red because a runner
+was slow teaches people to ignore red. Its value is as a release check somebody reads the
+output of.
+
+**If this fails:** read the failure before believing it. The first time this harness ran,
+four checks failed and **every one was a defect in the harness, not in BPE** — the header
+truncates at the terminal width, the save-path prompt and the effective-access path field
+both arrive pre-filled so typed text appends to them, and the original width check split the
+pty stream on newlines, which is meaningless for a program that redraws by moving the cursor.
+"The checklist failed" and "the thing driving the checklist failed" look identical in a log.
+
+A genuine failure is worth acting on: these are the paths a user touches first.
+
+---
+
 ## Credential Handling
 
 `BAO_TOKEN` and any other `BAO_*` credential-bearing environment variables must never appear in logs, diagnostic output, terminal screenshots, or bug reports. `internal/config.Config` holds the resolved token as a `SensitiveString`, a type whose formatting is redacted under every `fmt` verb (`%v`, `%+v`, `%#v`, `%s`, `%q`) and in error messages; only an explicit `.Reveal()` call returns the raw value, and the sole caller is `internal/baoclient.New`, which needs it to authenticate.
@@ -647,12 +696,18 @@ one the script created and can prove is disposable.
   with nothing written past the right margin; and `NO_COLOR=1` emitting no colour-setting
   sequences while staying readable, against a colour-on control.
 
-  The driver for that pass is not committed to this repository — it lives with the FSM-18
-  session notes. Four apparent failures in its first run were all defects in the driver
+  That driver is now committed, as `scripts/tui-checklist.py` with Step 15 above — Kevin's
+  instruction, 2026-09-19, as a repeatable opt-in release check that is deliberately not
+  wired into CI. Four apparent failures in its first run were all defects in the driver
   itself (a truncated header, two input fields that arrive pre-filled, and a naive
   line-width measurement that cannot account for cursor motion); **none was a fault in
   BPE**, which is worth recording because "the checklist failed" and "the thing driving the
   checklist failed" look identical in a log.
+- **Supported targets changed 2026-09-19**, at Kevin's instruction: linux/amd64,
+  linux/arm64, darwin/arm64 and **windows/amd64**. Windows is compiled now where it was
+  previously out of scope — the binary builds, and that is the whole claim; nothing about
+  its POSIX assumptions has been reviewed (README.md's Supported platforms). Intel macOS
+  (darwin/amd64) is no longer built.
 - **Licensing, verified 2026-09-19:** BPE is MPL-2.0 by its `LICENSE` file. All 42 modules
   in the build graph carry a licence file — 28 MIT, 11 MPL-2.0 (including
   `github.com/openbao/openbao/api/v2` and `github.com/hashicorp/hcl/v2`), 2 Apache-2.0, 1

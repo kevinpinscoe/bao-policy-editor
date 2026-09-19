@@ -96,20 +96,30 @@ BPE is a single static Go binary with no runtime dependencies. Continuous integr
 compiles it for each of these on every pull request, so a build regression on any of them
 fails the pull request rather than being discovered later:
 
-| Operating system | Architectures | Status |
+| Operating system | Architecture | Status |
 | --- | --- | --- |
-| Linux | `amd64`, `arm64` | Built in CI; developed and exercised on Fedora Linux |
-| macOS | `amd64`, `arm64` | Built in CI; not routinely exercised by hand |
-| Windows | — | Not built, not tested, not supported |
+| Linux | `amd64` | Built in CI; developed and exercised here |
+| Linux | `arm64` | Built in CI |
+| macOS | `arm64` | Built in CI (Apple silicon) |
+| Windows | `amd64` | Built in CI |
 
-**Compiled is not the same as exercised.** CI proves the macOS binaries build; the manual
-terminal workflows behind this project's verification are run on Linux. If you use BPE on
-macOS and something in the interface misbehaves, that is worth an issue — it has not been
-ruled out.
+**Compiled is not the same as exercised**, and the gap is widest at the bottom of that
+table. Every target is compiled on each pull request, so a build regression fails the pull
+request. Only Linux is actually *run*: the interactive checklist
+([RUNBOOK.md](RUNBOOK.md) Step 15) and the live OpenBao smoke test are executed there.
 
-Windows is out of scope for now rather than known-broken. The terminal handling, the
-signal-derived cancellation, and the atomic-write path with its permission preservation
-each assume POSIX behaviour, and none of that has been reviewed against Windows.
+On **macOS** nothing beyond the build is checked. If the interface misbehaves there, that
+is worth an issue — it has not been ruled out.
+
+On **Windows** treat it as untried. The binary compiles, and that is the whole of the
+claim. Terminal handling, the signal-derived cancellation path, and the atomic write with
+its permission preservation and hard-link detection all assume POSIX behaviour, and none of
+it has been reviewed — the hard-link check is explicitly skipped where it is unavailable
+(see [File writes](#file-writes)). Reports are welcome; do not assume the file-safety
+guarantees documented here hold there.
+
+**Intel macOS (`darwin/amd64`) is not built.** It is not a target rather than a known
+failure; say so in an issue if you need it.
 
 ## CLI Reference
 
@@ -788,7 +798,7 @@ been tagged, and nothing is distributed through a package manager. Build it from
 [Quick Start](#quick-start) — or not at all.
 
 What exists today is the *build* half. Continuous integration cross-compiles `cmd/bpe` for
-Linux and macOS on `amd64` and `arm64` on every pull request (see
+every supported target on each pull request (see
 [Supported platforms](#supported-platforms)), so the claim that this repository can produce
 cross-platform binaries is checked rather than asserted. Those builds are compile checks;
 they produce no artifact to download.

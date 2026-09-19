@@ -71,13 +71,20 @@ jobs:
         run: go test -race ./...
 
   cross-compile:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: Build ${{ matrix.target.goos }}/${{ matrix.target.goarch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        goos: [linux, darwin]
-        goarch: [amd64, arm64]
+        # The supported target set, listed explicitly rather than as a product
+        # of two axes — a product would build darwin/amd64, which is not a
+        # target, and would silently gain new combinations if either axis grew.
+        # Keep this in step with README.md's Supported platforms table.
+        target:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -88,8 +95,8 @@ jobs:
 
       - name: go build
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
           CGO_ENABLED: "0"
         run: go build -o /dev/null ./cmd/bpe
 
