@@ -17,8 +17,8 @@ source_path: /home/kinscoe/Projects/public/bao-policy-editor/RUNBOOK.md
 | Field                 | Value                                                                                          |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
 | **Owner**             | Kevin Inscoe                                                                                   |
-| **Last Updated**      | 2026-09-19                                                                                     |
-| **Last Tested**       | 2026-09-19 — full local suite, four cross-compile targets, Step 15 (19/19), Step 14 live smoke |
+| **Last Updated**      | 2026-10-15                                                                                     |
+| **Last Tested**       | 2026-10-15 — Step 16 run for v0.1.0; its code blocks re-tested in bash and zsh                 |
 | **Expected Duration** | N/A                                                                                            |
 | **Risk Level**        | Medium                                                                                         |
 | **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor>                                            |
@@ -725,10 +725,29 @@ than an enforced property. A repository dispatch has no such knob.
 
 #### Tag it, and verify the tag before it leaves the machine
 
+Every block from here to the end of this step is written to run unchanged in **bash or zsh**,
+pasted into an interactive shell. Three rules make that true, and all three matter:
+
+- **Arguments containing `[` `]` are quoted.** zsh treats an unquoted `client_payload[tag]=…`
+  as a filename pattern, fails with `no matches found`, and **never runs the command**. That is
+  exactly what happened on the first v0.1.0 dispatch attempt (2026-10-15): nothing was sent,
+  and it was retried with the arguments quoted.
+- **No `exit`.** A failed check prints a `STOP:` line and skips the rest of its block instead,
+  because `exit` in a pasted block closes the terminal the release is being run from.
+- **No `#` comments inside the blocks.** zsh's `interactivecomments` option is off by default
+  (and is off in Kevin's shell), so an interactive zsh runs `#` as a command — and an
+  apostrophe in the comment text opens a quote that silently swallows the following lines.
+  When this was tested, it swallowed the `REQUEST_ID` assignment, and the dispatch went out
+  with an empty request id. Explanations live in the prose around each block instead.
+
+Set the version once — `TAG` is the version Kevin authorized, and the only line to change.
+Every later block reads it from the same shell session:
+
 ```bash
+TAG=v0.1.0
 git checkout main && git pull --ff-only origin main
-git tag -s v0.1.0 -m "Release v0.1.0"
-git verify-tag v0.1.0
+git tag -s "${TAG}" -m "Release ${TAG}"
+git verify-tag "${TAG}"
 ```
 
 `git verify-tag` is the check worth making locally: a tag created without a working signing
@@ -736,7 +755,7 @@ setup is still a perfectly good tag, and the failure would otherwise surface onl
 push, in the workflow's preflight, with the tag already public. Do not push until it passes.
 
 ```bash
-git push origin v0.1.0
+git push origin "${TAG}"
 ```
 
 Pushing the tag publishes nothing by itself. It only makes the tag available for the
@@ -745,18 +764,15 @@ can still be deleted without anything having been released.
 
 #### Dispatch the publish, and watch the exact run it started
 
+`REQUEST_ID` is a unique id for *this* dispatch: it travels in the payload and appears in the
+run's display title, which is the only reliable way to identify the run a particular
+dispatch created. `MAIN_SHA` is the default-branch commit the workflow definition will be
+read from — a repository dispatch always runs from the default branch, so it is what the
+run's head SHA must turn out to be.
+
 ```bash
-TAG=v0.1.0
 REPO=kevinpinscoe/bao-policy-editor
-
-# A unique id for THIS dispatch. It travels in the payload and appears in the
-# run's display title, which is the only reliable way to identify the run a
-# particular dispatch created.
 REQUEST_ID="$(uuidgen)"
-
-# The default-branch commit the workflow definition will be read from. A
-# repository dispatch always runs from the default branch, so this is what the
-# run's head SHA must turn out to be.
 MAIN_SHA=$(gh api "repos/${REPO}/commits/main" --jq '.sha')
 
 echo "request id: ${REQUEST_ID}"
@@ -765,8 +781,8 @@ echo "main sha:   ${MAIN_SHA}"
 gh api "repos/${REPO}/dispatches" \
   --method POST \
   --field event_type=publish-release \
-  --field client_payload[tag]="${TAG}" \
-  --field client_payload[request_id]="${REQUEST_ID}"
+  --field "client_payload[tag]=${TAG}" \
+  --field "client_payload[request_id]=${REQUEST_ID}"
 ```
 
 Then find the run whose title carries that exact request id, and prove it is the right kind
@@ -777,25 +793,34 @@ RUN_ID=""
 for _ in $(seq 1 30); do
   RUN_ID=$(gh run list --repo "${REPO}" --workflow="Publish Release" \
     --event=repository_dispatch --limit 50 \
-    --json databaseId,displayTitle,headSha,event \
+    --json databaseId,displayTitle \
     --jq "[.[] | select(.displayTitle | contains(\"${REQUEST_ID}\"))] | first | .databaseId")
   [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] && break
   sleep 10
 done
 
-[ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ] || {
-  echo "no Publish Release run carrying ${REQUEST_ID} appeared within five minutes"; exit 1; }
+RUN_EVENT=""; RUN_SHA=""
+if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+  RUN_EVENT=$(gh run view "${RUN_ID}" --repo "${REPO}" --json event --jq '.event')
+  RUN_SHA=$(gh run view "${RUN_ID}" --repo "${REPO}" --json headSha --jq '.headSha')
+fi
 
-# Confirm it really is a repository dispatch, and that it ran from the
-# default-branch commit expected above.
-gh run view "${RUN_ID}" --repo "${REPO}" --json event,headSha \
-  --jq 'if .event == "repository_dispatch" then "event ok" else error("wrong event: " + .event) end'
-RUN_SHA=$(gh run view "${RUN_ID}" --repo "${REPO}" --json headSha --jq '.headSha')
-[ "${RUN_SHA}" = "${MAIN_SHA}" ] || {
-  echo "run ${RUN_ID} ran from ${RUN_SHA}, expected ${MAIN_SHA}"; exit 1; }
-
-gh run watch "${RUN_ID}" --repo "${REPO}" --exit-status
+if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" = "null" ]; then
+  echo "STOP: no Publish Release run carrying ${REQUEST_ID} appeared within five minutes"
+elif [ "${RUN_EVENT}" != "repository_dispatch" ]; then
+  echo "STOP: run ${RUN_ID} has event ${RUN_EVENT}, expected repository_dispatch"
+elif [ "${RUN_SHA}" != "${MAIN_SHA}" ]; then
+  echo "STOP: run ${RUN_ID} ran from ${RUN_SHA}, expected ${MAIN_SHA}"
+else
+  echo "run ${RUN_ID}: repository_dispatch from ${MAIN_SHA} — watching"
+  gh run watch "${RUN_ID}" --repo "${REPO}" --exit-status
+fi
 ```
+
+The second half confirms the run really is a repository dispatch and that it ran from
+`MAIN_SHA`, and watches it only if both hold. A `STOP:` line means do not go on to the
+verification below: find out why first. The run may still be in flight, so look at the
+Actions tab before concluding anything.
 
 **Why the request id rather than "the newest run".** A dispatched run cannot be identified
 by tag: its `headBranch` and `headSha` are the default branch's, because that is where the
@@ -817,14 +842,61 @@ accepts a moved tag, by design: the only correct response is to refuse.
 #### Afterwards, verify rather than assume
 
 ```bash
-gh release view v0.1.0 --repo kevinpinscoe/bao-policy-editor
-# then the verification in README.md's "Verifying a release"
+gh release view "${TAG}" --repo kevinpinscoe/bao-policy-editor
 ```
+
+Then run the verification in README.md's [Verifying a release](README.md#verifying-a-release)
+against the downloaded assets.
 
 Check all five effects landed: the release, the cask in `kevinpinscoe/homebrew-tap`, the
 manifest in `kevinpinscoe/scoop-bucket`, and an `add-package.yml` run in each of
 `kevinpinscoe/apt` and `kevinpinscoe/rpm`. A dispatch that silently failed leaves a release
 nobody can install.
+
+A successful `add-package.yml` run is evidence the dispatch was handled, not that the package
+is being served. Confirm that from the live sites, with a throw-away keyring so nothing on
+the host is changed. The first half checks that APT's `InRelease` is signed by the
+repository key and that each architecture lists the version; the second checks that RPM's
+`repomd.xml` is signed and that the primary metadata names the package:
+
+```bash
+V="${TAG#v}"
+W="$(mktemp -d)"; mkdir -m 700 "${W}/gnupg"
+A=https://kevinpinscoe.github.io/apt; P=https://kevinpinscoe.github.io/rpm
+
+curl -fsS "${A}/gpg.key" | GNUPGHOME="${W}/gnupg" gpg -q --import
+curl -fsS "${A}/dists/stable/InRelease" | GNUPGHOME="${W}/gnupg" gpg --verify
+for arch in amd64 arm64; do
+  curl -fsS "${A}/dists/stable/main/binary-${arch}/Packages" \
+    | grep -A1 '^Package: bao-policy-editor$' | grep "^Version: ${V}$" \
+    && echo "apt ${arch}: ${V} listed"
+done
+
+curl -fsS "${P}/repodata/repomd.xml" -o "${W}/repomd.xml"
+curl -fsS "${P}/repodata/repomd.xml.asc" -o "${W}/repomd.xml.asc"
+curl -fsS "${P}/gpg.key" | GNUPGHOME="${W}/gnupg" gpg -q --import
+GNUPGHOME="${W}/gnupg" gpg --verify "${W}/repomd.xml.asc" "${W}/repomd.xml"
+PRIMARY=$(grep -A3 'type="primary"' "${W}/repomd.xml" | sed -n 's/.*href="\([^"]*\)".*/\1/p')
+curl -fsS "${P}/${PRIMARY}" | gunzip \
+  | grep -A3 '<name>bao-policy-editor</name>' | grep -c "ver=\"${V}\""
+
+rm -rf "${W}"
+```
+
+Both `gpg --verify` calls must report `Good signature`. The APT loop must print one line per
+architecture, and the RPM count must be `2` — the version, once each for x86_64 and aarch64.
+
+**Published is not the same as installation-verified.** Everything above proves the release
+and the five channels were *published* correctly. It does not prove that `brew`, `apt`,
+`dnf` or `scoop` will install the package on a real client — that is acceptance work owned by
+each channel's own ticket (FSM-20 Homebrew, FSM-21 APT, FSM-22 RPM, FSM-23 Scoop), and none of
+it is claimed here.
+
+#### Release history
+
+| Version | Published | Commit | Publish run | Notes |
+| --- | --- | --- | --- | --- |
+| [`v0.1.0`](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | 2026-10-15 | `33172a3` | [38747569146](https://github.com/kevinpinscoe/bao-policy-editor/actions/runs/38747569146) | First release. Signature, checksums, SBOMs and all five channels verified as published; channel installation not yet verified. macOS acceptance test passed (34/0/0); the Fedora acceptance test was **waived as a prerequisite and deferred, not passed** — it runs after RPM installation under FSM-22. The `.deb` carries an empty `Section` field, tracked under FSM-21 and left for a later release |
 
 #### If it fails partway
 

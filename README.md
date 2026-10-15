@@ -6,13 +6,19 @@ Bao Policy Editor (BPE) is an open-source terminal interface for creating, editi
 
 ## Status
 
-Experimental
+Experimental. The first published release is
+[**v0.1.0**](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0)
+(2026-10-15) — see [Build and Release](#build-and-release) for where it is published and
+how to verify it.
 
 ## Purpose
 
 BPE helps OpenBao administrators and platform engineers understand policy behavior before granting access. It provides a guided alternative to manually editing HCL, with particular attention to path precedence, wildcards, capabilities, explicit denies, and KV v2 paths. It works with local policy files without an OpenBao server, and optionally reads and updates policies through the OpenBao API. Nothing currently depends on it.
 
 ## Quick Start
+
+To use the published release instead of building it, see
+[Installing a release](#installing-a-release). To build from source:
 
 ```bash
 git clone git@github.com:kevinpinscoe/bao-policy-editor.git
@@ -94,7 +100,8 @@ connection, whatever `BAO_ADDR` and `BAO_TOKEN` are set to.
 
 BPE is a single static Go binary with no runtime dependencies. Continuous integration
 compiles it for each of these on every pull request, so a build regression on any of them
-fails the pull request rather than being discovered later:
+fails the pull request rather than being discovered later. The v0.1.0 release ships all
+four:
 
 | Operating system | Architecture | Status |
 | --- | --- | --- |
@@ -108,15 +115,25 @@ table. Every target is compiled on each pull request, so a build regression fail
 request. Only Linux is actually *run*: the interactive checklist
 ([RUNBOOK.md](RUNBOOK.md) Step 15) and the live OpenBao smoke test are executed there.
 
-On **macOS** nothing beyond the build is checked. If the interface misbehaves there, that
-is worth an issue — it has not been ruled out.
+On **macOS** the build is checked on every pull request, and the v0.1.0 release candidate
+also passed a local acceptance test on Apple silicon (34 passed, 0 failed, 0 skipped): the
+build, the full test suite including `-race`, and the interactive checklist. Terminal modes
+after each editor run matched those before it, apart from macOS's kernel-maintained
+`PENDIN` flag, which the known-good `less` control changes in exactly the same way. That is
+one release on one machine, not continuous coverage — if the interface misbehaves there,
+that is worth an issue.
 
-On **Windows** treat it as untried. The binary compiles, and that is the whole of the
-claim. Terminal handling, the signal-derived cancellation path, and the atomic write with
-its permission preservation and hard-link detection all assume POSIX behaviour, and none of
-it has been reviewed — the hard-link check is explicitly skipped where it is unavailable
-(see [File writes](#file-writes)). Reports are welcome; do not assume the file-safety
-guarantees documented here hold there.
+On **Linux**, the equivalent release-level acceptance test for v0.1.0 on Fedora was
+**waived as a release prerequisite and deferred — it has not passed**. It runs after RPM
+installation is verified (FSM-22). The development-time checks above still run on Linux.
+
+On **Windows** treat it as untried. The binary compiles and is published in v0.1.0 — a
+deliberate decision to ship it without acceptance testing rather than drop the target — and
+that is the whole of the claim. Terminal handling, the signal-derived cancellation path,
+and the atomic write with its permission preservation and hard-link detection all assume
+POSIX behaviour, and none of it has been reviewed — the hard-link check is explicitly
+skipped where it is unavailable (see [File writes](#file-writes)). Reports are welcome; do
+not assume the file-safety guarantees documented here hold there.
 
 **Intel macOS (`darwin/amd64`) is not built.** It is not a target rather than a known
 failure; say so in an issue if you need it.
@@ -793,9 +810,60 @@ OpenBao API ─────┘
 
 ## Build and Release
 
-**No release has been published yet.** The pipeline below is configured and dry-run
-verified, but no tag exists, so there is nothing to download. Build from source —
-[Quick Start](#quick-start) — until the first release is cut.
+The first release, [**v0.1.0**](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0),
+was published on 2026-10-15 from commit `33172a3` by the pipeline described below. Its
+signature, checksums and SBOMs were verified after publication.
+
+### Where releases are published
+
+One release run publishes to all five places at once. **Published** below means the
+artifact was confirmed present and correctly signed or hashed on the live channel after
+v0.1.0 went out. It does not mean installation through that channel has been tested — that
+is still to be done, and is tracked per channel.
+
+| Channel | Where | v0.1.0 | Installation verified |
+| --- | --- | --- | --- |
+| GitHub release | [releases/tag/v0.1.0](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | Published: four binaries, `.deb`/`.rpm`, SBOMs, signed checksums | Linux amd64 direct download, below, tested in bash and zsh; other platforms not yet |
+| Homebrew cask | [`kevinpinscoe/homebrew-tap`](https://github.com/kevinpinscoe/homebrew-tap), cask `bao-policy-editor` | Published: macOS arm64, Linux amd64/arm64 | **Not yet** (FSM-20) |
+| APT | [kevinpinscoe.github.io/apt](https://kevinpinscoe.github.io/apt), package `bao-policy-editor` | Published: amd64, arm64; signed index | **Not yet** (FSM-21) |
+| RPM | [kevinpinscoe.github.io/rpm](https://kevinpinscoe.github.io/rpm), package `bao-policy-editor` | Published: x86_64, aarch64; signed packages and metadata | **Not yet** (FSM-22) |
+| Scoop | [`kevinpinscoe/scoop-bucket`](https://github.com/kevinpinscoe/scoop-bucket), manifest `bao-policy-editor` | Published: Windows amd64 | **Not yet** (FSM-23) |
+
+Each channel's install instructions are added here once its installation has been
+verified. Until then, the supported route is the direct download.
+
+### Installing a release
+
+Download the binary for your platform with the two checksum files, verify them (see
+[Verifying a release](#verifying-a-release) for what the `cosign` step asserts), and put
+the binary on your `PATH`. For Linux amd64 — substitute `bpe-linux-arm64` or
+`bpe-darwin-arm64` as needed:
+
+```bash
+VERSION=v0.1.0
+ASSET=bpe-linux-amd64
+BASE="https://github.com/kevinpinscoe/bao-policy-editor/releases/download/${VERSION}"
+curl -fsSLO "${BASE}/${ASSET}"
+curl -fsSLO "${BASE}/checksums.txt"
+curl -fsSLO "${BASE}/checksums.txt.sigstore.json"
+
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity \
+    'https://github.com/kevinpinscoe/bao-policy-editor/.github/workflows/publish-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+
+install -m 0755 "${ASSET}" ~/.local/bin/bpe
+bpe --version
+```
+
+On macOS use `shasum -a 256 --ignore-missing -c checksums.txt` in place of `sha256sum`. On
+Windows, download `bpe-windows-amd64.zip`, check its SHA-256 against `checksums.txt`, and
+extract `bpe.exe`.
+
+`bpe --version` should print `0.1.0` and commit `33172a3ad2a169ae674cd893fe86eaa155d38783`.
 
 ### How a release is made
 
