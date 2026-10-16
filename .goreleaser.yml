@@ -58,6 +58,21 @@ nfpms:
     formats: [deb, rpm]
     bindir: /usr/bin
     ids: [bpe]
+    # Debian control fields, set explicitly rather than left to nfpm. An empty
+    # Section shipped in v0.1.0 (FSM-19, FSM-21). Both are ignored for rpm.
+    section: admin
+    priority: optional
+    contents:
+      # Debian requires every package to carry its copyright and licence notices.
+      # packaging/deb/copyright is DEP-5; it covers BPE, every Go module linked
+      # into bpe, and the Go standard library's third-party notices, so re-check
+      # it whenever go.mod or the release's Go version changes (RUNBOOK, Step 16).
+      # deb only: the rpm already carries `License: MPL-2.0` in its header.
+      - src: packaging/deb/copyright
+        dst: /usr/share/doc/bao-policy-editor/copyright
+        packager: deb
+        file_info:
+          mode: 0644
 
 # `brews:` was deprecated in GoReleaser v2.10 and is slated for removal in
 # v2.16. Casks cover Linux as well as macOS since Homebrew/brew#19121 added
