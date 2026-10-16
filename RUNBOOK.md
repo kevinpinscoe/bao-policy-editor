@@ -957,6 +957,46 @@ The ordering was checked with `rpmdev-vercmp` and `dpkg --compare-versions` on 2
 and again with rpm's own `rpm.vercmp` and dpkg on 2026-10-16. The nfpm behaviour was
 checked in nfpm's source (FSM-22).
 
+#### Debian copyright file
+
+The `.deb` installs `packaging/deb/copyright` as `/usr/share/doc/bao-policy-editor/copyright`
+(`.goreleaser.yml`, `nfpms.contents`, deb only). The same nfpm block sets `section: admin`
+and `priority: optional`. v0.1.0 shipped neither the file nor a Section (FSM-19, FSM-21);
+both are fixed on `main` and reach users only with the next release.
+
+The file is DEP-5 (`copyright-format/1.0`). It covers BPE (MPL-2.0), the Go standard
+library, and **every Go module linked into `bpe`**, one `Files` paragraph each, because a
+static binary contains all of them. The MPL-2.0 and Apache-2.0 texts are referenced from
+`/usr/share/common-licenses`, present on Debian 12 and 13 and Ubuntu 22.04 and 24.04. The
+MIT (`Expat`), the three BSD-3-Clause wordings, and the Unicode License V3 are included in
+full.
+
+**Re-check it before every release.** A dependency added, removed or upgraded in `go.mod`
+makes the file wrong without anything failing. After the Step 17 snapshot build:
+
+```bash
+bash scripts/check-deb-copyright.sh
+```
+
+It compares the modules recorded in the built binary (`go version -m`) with the
+`Go module <path> <version>.` lines in the file, and fails on any difference. To fix a
+failure, edit the file by hand. For each new or changed module:
+
+1. Read the licence from the module's own licence file (`go mod download -json <mod>@<ver>`
+   gives its directory), not from its name. Then check the headers of the source files
+   actually linked (`go list -deps ./cmd/bpe`) for files under a different licence.
+2. Take the copyright holders from that licence file and those headers. Where neither states
+   one, say so in the paragraph rather than inventing a holder (five HashiCorp MPL-2.0
+   modules are recorded that way).
+3. Reproduce any `NOTICE` file an Apache-2.0 module carries (section 4(d)).
+4. Run the check again, rebuild, and confirm the file inside the `.deb` (Step 17).
+
+How the file was built, and the questions it leaves open, are recorded on FSM-21. In short:
+the 42 modules were classified with `google/licensecheck` (every match at 97.7% or better,
+the remainder being the copyright line). One nested licence applies (`go-jose/v4/json`,
+BSD-3-Clause). One Go-licensed file in `go-viper/mapstructure` is excluded by its
+`!go1.20` build tag. `rivo/uniseg`'s generated tables point to the Unicode licence.
+
 #### Pinned tool versions
 
 The release toolchain is pinned in `.github/workflows/publish-release.yml`, not floating,
@@ -994,6 +1034,17 @@ dpkg-deb -c  dist/bao-policy-editor_*_linux_amd64.deb   # expect ./usr/bin/bpe
 dpkg-deb -I  dist/bao-policy-editor_*_linux_amd64.deb
 rpm -qlp     dist/bao-policy-editor_*_linux_amd64.rpm   # expect /usr/bin/bpe
 rpm -qip     dist/bao-policy-editor_*_linux_amd64.rpm   # expect License: MPL-2.0
+```
+
+The `.deb` must also carry its copyright file and a Section, and the file must still match
+the modules in the binary:
+
+```bash
+dpkg-deb -c dist/bao-policy-editor_*_linux_amd64.deb   # also ./usr/share/doc/bao-policy-editor/copyright
+dpkg-deb -f dist/bao-policy-editor_*_linux_amd64.deb Section   # expect admin
+dpkg-deb --fsys-tarfile dist/bao-policy-editor_*_linux_amd64.deb \
+  | tar -xO ./usr/share/doc/bao-policy-editor/copyright | cmp - packaging/deb/copyright
+bash scripts/check-deb-copyright.sh
 ```
 
 **Two things that look wrong and are not.**

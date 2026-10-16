@@ -765,6 +765,9 @@ bao-policy-editor/
 │   └── apperr/                 # Structured application errors and the exit-code contract
 ├── testdata/
 │   └── policies/              # Valid, invalid, and edge-case HCL fixtures
+├── packaging/
+│   └── deb/copyright           # DEP-5 copyright file the .deb installs (RUNBOOK.md Step 16)
+├── scripts/                    # live smoke test, TUI checklist driver, check-deb-copyright.sh
 ├── docs/                       # human decision-making documents
 ├── .github/
 │   └── workflows/              # CI/release workflows
@@ -977,8 +980,9 @@ Upgrade with `sudo apt-get install --only-upgrade bao-policy-editor`. Remove wit
 `sudo apt-get remove bao-policy-editor`, or `purge`. Removal leaves nothing behind: the
 package owns only `/usr/bin/bpe`, and BPE writes no system-wide configuration.
 
-**v0.1.0's `.deb` has two known packaging gaps**, and both are fixed in a later release
-rather than by republishing v0.1.0:
+**v0.1.0's `.deb` has two known packaging gaps.** Both are corrected on `main` for the
+next release, and v0.1.0 will not be republished. No corrected package has been published
+yet:
 
 - It ships no `/usr/share/doc/bao-policy-editor/copyright` file, so the package carries no
   licence text. BPE is MPL-2.0; see [License](#license).
