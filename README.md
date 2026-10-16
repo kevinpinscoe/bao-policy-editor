@@ -124,11 +124,13 @@ one release on one machine, not continuous coverage — if the interface misbeha
 that is worth an issue.
 
 On **Linux**, the equivalent release-level acceptance test for v0.1.0 on Fedora was
-**waived as a release prerequisite and deferred — it has not passed**. RPM *installation*
-on Fedora has since been verified (see
-[Installing from the RPM repository](#installing-from-the-rpm-repository-fedora)), but that
-is a different test: it proves the package installs, verifies, upgrades and removes
-cleanly, not that the interactive editor behaves correctly in a Fedora terminal. The
+**waived as a release prerequisite and deferred — it has not passed**. Package
+*installation* has since been verified on Fedora (see
+[Installing from the RPM repository](#installing-from-the-rpm-repository-fedora)) and on
+Debian and Ubuntu (see
+[Installing from the APT repository](#installing-from-the-apt-repository-debian-and-ubuntu)),
+but that is a different test: it proves the package installs, verifies and removes
+cleanly, not that the interactive editor behaves correctly in those terminals. The
 interactive acceptance test is still outstanding. The development-time checks above still
 run on Linux.
 
@@ -830,7 +832,7 @@ is still to be done, and is tracked per channel.
 | --- | --- | --- | --- |
 | GitHub release | [releases/tag/v0.1.0](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | Published: four binaries, `.deb`/`.rpm`, SBOMs, signed checksums | Linux amd64 direct download, below, tested in bash and zsh; other platforms not yet |
 | Homebrew cask | [`kevinpinscoe/homebrew-tap`](https://github.com/kevinpinscoe/homebrew-tap), cask `bao-policy-editor` | Published: macOS arm64, Linux amd64/arm64 | **Not yet** (FSM-20) |
-| APT | [kevinpinscoe.github.io/apt](https://kevinpinscoe.github.io/apt), package `bao-policy-editor` | Published: amd64, arm64; signed index | **Not yet** (FSM-21) |
+| APT | [kevinpinscoe.github.io/apt](https://kevinpinscoe.github.io/apt), package `bao-policy-editor` | Published: amd64, arm64; signed index | Debian 12 and 13, Ubuntu 22.04 and 24.04 amd64, clean containers (FSM-21); arm64 package selection checked, not installed |
 | RPM | [kevinpinscoe.github.io/rpm](https://kevinpinscoe.github.io/rpm), package `bao-policy-editor` | Published: x86_64, aarch64; signed packages and metadata | Fedora 42 and 43 x86_64, clean containers (FSM-22); aarch64 package selection checked, not installed |
 | Scoop | [`kevinpinscoe/scoop-bucket`](https://github.com/kevinpinscoe/scoop-bucket), manifest `bao-policy-editor` | Published: Windows amd64 | **Not yet** (FSM-23) |
 
@@ -936,6 +938,78 @@ This is **installation acceptance only**. It says nothing about the interactive 
 a Fedora terminal — screens, keyboard and mouse handling, terminal-mode restoration. That
 interactive acceptance test ([RUNBOOK.md](RUNBOOK.md) Step 15) is separate, is run by a
 person, and **has not passed on Fedora** (see [Supported platforms](#supported-platforms)).
+
+### Installing from the APT repository (Debian and Ubuntu)
+
+The package is `bao-policy-editor`; the command it installs is `/usr/bin/bpe`. The
+repository is the shared [kevinpinscoe/apt](https://github.com/kevinpinscoe/apt)
+repository: one distribution, `stable`, component `main`, for amd64 and arm64. It does not
+depend on the Debian or Ubuntu release, and `apt` picks the package matching the client's
+architecture.
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://kevinpinscoe.github.io/apt/gpg.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/kevinpinscoe.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/kevinpinscoe.gpg] https://kevinpinscoe.github.io/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/kevinpinscoe.list
+sudo apt-get update
+sudo apt-get install bao-policy-editor
+bpe --version
+```
+
+`/etc/apt/keyrings` already exists on Debian 12 and later and on Ubuntu 22.04 and later. The
+first line only matters on older releases, and is harmless on newer ones.
+
+The key is the same one the RPM repository uses, fingerprint
+`8CD9AAACEE8B5AFB7607BC2B300FD9BDDA1BF809`. Compare it before trusting the key:
+
+```bash
+gpg --show-keys /etc/apt/keyrings/kevinpinscoe.gpg
+```
+
+`signed-by=` limits that key to this one repository. `apt` checks the repository's signed
+`InRelease` against it, and checks every index and package against the hashes that file
+lists, so a package that does not match is refused (`Hash Sum mismatch`). The `.deb` files
+themselves carry no signature of their own; the repository signature is what protects them.
+
+Upgrade with `sudo apt-get install --only-upgrade bao-policy-editor`. Remove with
+`sudo apt-get remove bao-policy-editor`, or `purge`. Removal leaves nothing behind: the
+package owns only `/usr/bin/bpe`, and BPE writes no system-wide configuration.
+
+**v0.1.0's `.deb` has two known packaging gaps**, and both are fixed in a later release
+rather than by republishing v0.1.0:
+
+- It ships no `/usr/share/doc/bao-policy-editor/copyright` file, so the package carries no
+  licence text. BPE is MPL-2.0; see [License](#license).
+- Its `Section:` field is empty.
+
+Neither affects installing or running `bpe`.
+
+#### What was verified, and what was not (APT)
+
+Installation acceptance for v0.1.0 ran on 2026-10-16 in clean Debian 12, Debian 13,
+Ubuntu 22.04 and Ubuntu 24.04 amd64 containers against the live repository (FSM-21):
+
+- the repository's own install procedure works as written, and the keyring's fingerprint
+  matches;
+- `apt-get update` succeeds with the `signed-by` keyring, with no `NO_PUBKEY` or signature
+  warning;
+- `apt-get install`, `bpe --version` (0.1.0), `dpkg --verify`, and `/usr/bin/bpe` at 0755
+  all pass;
+- the served `.deb`'s SHA-256 matches the signed index;
+- `apt-get install --only-upgrade` is a clean no-op. No newer version exists yet, so a real
+  upgrade has not been exercised, and `dpkg --compare-versions` confirms the intended
+  ordering;
+- `apt-get remove` and `purge` leave no file on the system that was not there before;
+- an arm64 client resolves the arm64 package. This was checked by running `apt` as an
+  arm64 client, without arm64 hardware or an emulator, so the arm64 package has not been
+  *installed*;
+- against a local copy of the repository, apt refuses a tampered `InRelease`, an unsigned
+  repository, a tampered `Packages` index, and a corrupted `.deb`, and installs nothing.
+
+This is **installation acceptance only**, the same as for RPM. The interactive editor has
+not been acceptance-tested on Debian or Ubuntu.
 
 ### How a release is made
 
