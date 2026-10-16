@@ -968,8 +968,21 @@ The file is DEP-5 (`copyright-format/1.0`). It covers BPE (MPL-2.0), the Go stan
 library, and **every Go module linked into `bpe`**, one `Files` paragraph each, because a
 static binary contains all of them. The MPL-2.0 and Apache-2.0 texts are referenced from
 `/usr/share/common-licenses`, present on Debian 12 and 13 and Ubuntu 22.04 and 24.04. The
-MIT (`Expat`), the three BSD-3-Clause wordings, and the Unicode License V3 are included in
-full.
+MIT (`Expat`), the three BSD-3-Clause wordings, and the Unicode data-files licence
+(`Unicode-DFS-2016`, for `rivo/uniseg`'s tables) are included in full.
+
+The Go standard library is not one licence. Some of its files, compiled into `bpe`, carry
+notices of their own that must be kept:
+
+- Sun Microsystems (FreeBSD `msun`, three wordings, 15 `math` files);
+- Stephen L. Moshier (Cephes, 5 `math` files);
+- fiat-crypto (2 files carrying its licence, plus 5 generated files whose licence Go states
+  in `crypto/internal/fips140/nistec/fiat/README` and `edwards25519/scalar.go`);
+- Lucent / Vita Nuova (Inferno, `runtime/memmove_amd64.s`, amd64 only).
+
+Each has its own paragraph, with the notice verbatim. Two more files are derived from
+public-domain code and are recorded for completeness. These come from the **Go toolchain**,
+not `go.mod`, so the module check below cannot see them.
 
 **Re-check it before every release.** A dependency added, removed or upgraded in `go.mod`
 makes the file wrong without anything failing. After the Step 17 snapshot build:
@@ -991,11 +1004,38 @@ failure, edit the file by hand. For each new or changed module:
 3. Reproduce any `NOTICE` file an Apache-2.0 module carries (section 4(d)).
 4. Run the check again, rebuild, and confirm the file inside the `.deb` (Step 17).
 
+**When the release's Go version changes** (the publish workflow uses the newest patch of the
+`go` line in `go.mod`), re-scan the standard-library files compiled into `bpe` for
+third-party notices:
+
+```bash
+for a in amd64 arm64; do
+  GOOS=linux GOARCH=$a CGO_ENABLED=0 go list -deps \
+    -f '{{if .Standard}}{{$d:=.Dir}}{{range .GoFiles}}{{$d}}/{{.}} {{end}}{{range .SFiles}}{{$d}}/{{.}} {{end}}{{end}}' ./cmd/bpe
+done | tr ' ' '\n' | sort -u | grep . \
+  | xargs grep -lE 'Copyright|©|public domain' | xargs grep -LE 'Copyright (\(c\) )?[0-9]{4}(-[0-9]{4})? The Go Authors'
+for a in amd64 arm64; do
+  GOOS=linux GOARCH=$a CGO_ENABLED=0 go list -deps \
+    -f '{{if .Standard}}{{$d:=.Dir}}{{range .GoFiles}}{{$d}}/{{.}} {{end}}{{range .SFiles}}{{$d}}/{{.}} {{end}}{{end}}' ./cmd/bpe
+done | tr ' ' '\n' | sort -u | grep . \
+  | xargs grep -lE 'Sun Microsystems|Moshier|Fiat Cryptography|fiat-crypto Authors|Lucent|public domain'
+```
+
+The first command lists compiled files that mention a copyright but carry no Go Authors
+header. For go1.27.2 it prints one file, `unicode/tables.go`. That is a generated Unicode
+table: the `©` is a table entry, and it has no header at all. The copyright file records
+it. The second command lists files with third-party notices. For go1.27.2 that is 30 files,
+each with its own paragraph in the copyright file. Compare both lists with the file; any
+file that isn't listed there needs its notice added.
+
 How the file was built, and the questions it leaves open, are recorded on FSM-21. In short:
 the 42 modules were classified with `google/licensecheck` (every match at 97.7% or better,
 the remainder being the copyright line). One nested licence applies (`go-jose/v4/json`,
 BSD-3-Clause). One Go-licensed file in `go-viper/mapstructure` is excluded by its
-`!go1.20` build tag. `rivo/uniseg`'s generated tables point to the Unicode licence.
+`!go1.20` build tag. `rivo/uniseg`'s tables were generated from Unicode 15.0.0 data, which
+Unicode published under the data-files licence (`Unicode-DFS-2016`, from unicode.org's
+licence page as archived in September and October 2022). Unicode License V3 replaced it on
+that page only in 2023, and is not applied retrospectively.
 
 #### Pinned tool versions
 

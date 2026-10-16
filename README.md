@@ -990,6 +990,64 @@ yet:
 
 Neither affects installing or running `bpe`.
 
+**Right after a release**, for up to ten minutes, `apt-get update` can report
+`Hash Sum mismatch` for this repository, or `apt-get install` can fail with a 404. GitHub
+Pages caches the repository's files for 600 seconds, so a client can briefly be served an
+index from one publish and a file from another. apt refuses such a mismatch rather than
+installing anything unverified. Wait ten minutes and run `apt-get update` again.
+
+#### Rolling back to an earlier version
+
+The APT repository holds **only the current version** of each package: publishing a new
+version removes the previous `.deb` from it. So `apt-get install bao-policy-editor=<old>`
+does not work. Rollback is a **manual install of a verified release artifact**: every
+version's `.deb` stays attached to its GitHub release, alongside the signed checksums that
+cover it. Verify all three things before installing:
+
+- **provenance and signature:** the `cosign` step proves `checksums.txt` was signed by this
+  repository's publishing workflow on `main` (see [Verifying a release](#verifying-a-release));
+- **checksum:** `sha256sum` proves the `.deb` is the file those checksums describe;
+- **package identity:** `dpkg-deb -f` confirms the package name, version and architecture.
+
+Set `VERSION` to the release to roll back to:
+
+```bash
+VERSION=v0.1.0
+ARCH="$(dpkg --print-architecture)"
+DEB="bao-policy-editor_${VERSION#v}_linux_${ARCH}.deb"
+BASE="https://github.com/kevinpinscoe/bao-policy-editor/releases/download/${VERSION}"
+curl -fsSLO "${BASE}/${DEB}"
+curl -fsSLO "${BASE}/checksums.txt"
+curl -fsSLO "${BASE}/checksums.txt.sigstore.json"
+
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity \
+    'https://github.com/kevinpinscoe/bao-policy-editor/.github/workflows/publish-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+dpkg-deb -f "${DEB}" Package Version Architecture
+```
+
+**Stop here unless all three checks passed:** `cosign` printed `Verified OK`, `sha256sum`
+printed `OK` for the `.deb`, and `dpkg-deb` showed `bao-policy-editor`, the version you
+asked for, and your architecture. The install is a separate block for that reason. Pasted
+into a terminal, a failed check does not stop the lines after it. Then install, from the
+same shell:
+
+```bash
+sudo apt-get install --allow-downgrades "./${DEB}"
+sudo apt-mark hold bao-policy-editor
+```
+
+`apt-mark hold` stops the next `apt-get upgrade` from moving forward again. Run
+`sudo apt-mark unhold bao-policy-editor` when you want upgrades back.
+
+This works for every BPE release, whatever is in the APT repository. It does **not** give
+you `apt`'s normal version retention, and the downgraded package is no longer tied to the
+repository's signed index. The checks above stand in for that index.
+
 #### What was verified, and what was not (APT)
 
 Installation acceptance for v0.1.0 ran on 2026-10-16 in clean Debian 12, Debian 13,
