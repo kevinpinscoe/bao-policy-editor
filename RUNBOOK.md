@@ -17,7 +17,7 @@ source_path: /home/kinscoe/Projects/public/bao-policy-editor/RUNBOOK.md
 | Field                 | Value                                                                                          |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
 | **Owner**             | Kevin Inscoe                                                                                   |
-| **Last Updated**      | 2026-10-15                                                                                     |
+| **Last Updated**      | 2026-10-16                                                                                     |
 | **Last Tested**       | 2026-10-15 — Step 16 run for v0.1.0; its code blocks re-tested in bash and zsh                 |
 | **Expected Duration** | N/A                                                                                            |
 | **Risk Level**        | Medium                                                                                         |
@@ -896,7 +896,7 @@ it is claimed here.
 
 | Version | Published | Commit | Publish run | Notes |
 | --- | --- | --- | --- | --- |
-| [`v0.1.0`](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | 2026-10-15 | `33172a3` | [38747569146](https://github.com/kevinpinscoe/bao-policy-editor/actions/runs/38747569146) | First release. Signature, checksums, SBOMs and all five channels verified as published; channel installation not yet verified. macOS acceptance test passed (34/0/0); the Fedora acceptance test was **waived as a prerequisite and deferred, not passed** — it runs after RPM installation under FSM-22. The `.deb` carries an empty `Section` field, tracked under FSM-21 and left for a later release |
+| [`v0.1.0`](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | 2026-10-15 | `33172a3` | [38747569146](https://github.com/kevinpinscoe/bao-policy-editor/actions/runs/38747569146) | First release. Signature, checksums, SBOMs and all five channels verified as published; channel installation not yet verified. macOS acceptance test passed (34/0/0); the Fedora acceptance test was **waived as a prerequisite and deferred, not passed** — it runs after RPM installation under FSM-22. RPM installation itself was verified in clean Fedora 42 and 43 x86_64 containers on 2026-10-15 (FSM-22); the interactive Fedora test is still deferred, not passed. The `.deb` carries an empty `Section` field, tracked under FSM-21 and left for a later release |
 
 #### If it fails partway
 
@@ -909,6 +909,53 @@ the artifacts someone already downloaded no longer match the tag they came from,
 Sigstore certificate still attests the original. Delete the GitHub release and its assets
 if they are wrong, leave the tag where it is, fix the problem on `main`, and cut the next
 version.
+
+#### Package version and revision policy
+
+**A packaging correction ships as a new upstream patch version.** If a published `.rpm` or
+`.deb` is wrong, even when the Go code is unchanged, fix the packaging on `main` and cut the
+next patch version (`v0.1.0` → `v0.1.1`) through this Step. Kevin approved this policy on
+2026-10-16 (FSM-22).
+
+Under this release model:
+
+- **RPM `Release` stays `1`.** nfpm, which GoReleaser uses to build the packages, defaults
+  it to `1`, and `.goreleaser.yml` does not set it.
+- **The `.deb` carries no Debian revision.** Its version is the bare upstream version
+  (`0.1.0`), because nfpm appends `-<release>` only when a release is set.
+- **Never tag `v0.1.0-2`, or anything else with a hyphen suffix, to mean "revision 2".**
+  GoReleaser reads `-2` as a semver prerelease, and nfpm writes a prerelease with `~`. The
+  package version would be `0.1.0~2`, and `~` sorts *before* the bare version in both rpm
+  and dpkg:
+
+  | Comparison | rpm (`rpmdev-vercmp`) | dpkg (`dpkg --compare-versions`) |
+  | --- | --- | --- |
+  | `0.1.0~2` vs `0.1.0` | older | older |
+  | `0.1.0` vs `0.1.1` | older | older |
+
+  A client with `0.1.0` would treat the "corrected" package as a downgrade and never install
+  it.
+- **Never modify or republish an existing version.** The repositories re-sign whatever they
+  receive, so the same filename would get different bytes. Clients holding cached metadata
+  then see a checksum mismatch, and the release's Sigstore signature and checksums no longer
+  describe what is being served.
+- **No unsigned or out-of-band publishing path.** Every package reaches `kevinpinscoe/apt`
+  and `kevinpinscoe/rpm` through this Step's signed-tag pipeline, and nowhere else.
+
+**Limitations of this policy.**
+
+- A packaging-only fix advances the upstream version number even though the program did
+  not change. `bpe --version` reports the new number, and the release notes have to say
+  that only the packaging changed.
+- `Release` and the Debian revision exist to express "same upstream, rebuilt package", and
+  this model never uses them. Doing so would need a publish path that is not driven by a
+  tag, and that would bypass the tag-identity checks above. That would be a new design
+  decision, not a variation of this Step.
+- Homebrew and Scoop get the new version too, even if only the Linux packages were wrong.
+
+The ordering was checked with `rpmdev-vercmp` and `dpkg --compare-versions` on 2026-10-15,
+and again with rpm's own `rpm.vercmp` and dpkg on 2026-10-16. The nfpm behaviour was
+checked in nfpm's source (FSM-22).
 
 #### Pinned tool versions
 

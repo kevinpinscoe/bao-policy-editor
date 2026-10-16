@@ -124,8 +124,13 @@ one release on one machine, not continuous coverage — if the interface misbeha
 that is worth an issue.
 
 On **Linux**, the equivalent release-level acceptance test for v0.1.0 on Fedora was
-**waived as a release prerequisite and deferred — it has not passed**. It runs after RPM
-installation is verified (FSM-22). The development-time checks above still run on Linux.
+**waived as a release prerequisite and deferred — it has not passed**. RPM *installation*
+on Fedora has since been verified (see
+[Installing from the RPM repository](#installing-from-the-rpm-repository-fedora)), but that
+is a different test: it proves the package installs, verifies, upgrades and removes
+cleanly, not that the interactive editor behaves correctly in a Fedora terminal. The
+interactive acceptance test is still outstanding. The development-time checks above still
+run on Linux.
 
 On **Windows** treat it as untried. The binary compiles and is published in v0.1.0 — a
 deliberate decision to ship it without acceptance testing rather than drop the target — and
@@ -826,7 +831,7 @@ is still to be done, and is tracked per channel.
 | GitHub release | [releases/tag/v0.1.0](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | Published: four binaries, `.deb`/`.rpm`, SBOMs, signed checksums | Linux amd64 direct download, below, tested in bash and zsh; other platforms not yet |
 | Homebrew cask | [`kevinpinscoe/homebrew-tap`](https://github.com/kevinpinscoe/homebrew-tap), cask `bao-policy-editor` | Published: macOS arm64, Linux amd64/arm64 | **Not yet** (FSM-20) |
 | APT | [kevinpinscoe.github.io/apt](https://kevinpinscoe.github.io/apt), package `bao-policy-editor` | Published: amd64, arm64; signed index | **Not yet** (FSM-21) |
-| RPM | [kevinpinscoe.github.io/rpm](https://kevinpinscoe.github.io/rpm), package `bao-policy-editor` | Published: x86_64, aarch64; signed packages and metadata | **Not yet** (FSM-22) |
+| RPM | [kevinpinscoe.github.io/rpm](https://kevinpinscoe.github.io/rpm), package `bao-policy-editor` | Published: x86_64, aarch64; signed packages and metadata | Fedora 42 and 43 x86_64, clean containers (FSM-22); aarch64 package selection checked, not installed |
 | Scoop | [`kevinpinscoe/scoop-bucket`](https://github.com/kevinpinscoe/scoop-bucket), manifest `bao-policy-editor` | Published: Windows amd64 | **Not yet** (FSM-23) |
 
 Each channel's install instructions are added here once its installation has been
@@ -864,6 +869,73 @@ Windows, download `bpe-windows-amd64.zip`, check its SHA-256 against `checksums.
 extract `bpe.exe`.
 
 `bpe --version` should print `0.1.0` and commit `33172a3ad2a169ae674cd893fe86eaa155d38783`.
+
+### Installing from the RPM repository (Fedora)
+
+The package is `bao-policy-editor`; the command it installs is `/usr/bin/bpe`. The
+repository is the shared [kevinpinscoe/rpm](https://github.com/kevinpinscoe/rpm)
+repository, which serves x86_64 and aarch64 packages from one flat, release-independent
+`baseurl`; `dnf` picks the package matching the client's architecture.
+
+```bash
+sudo dnf config-manager addrepo \
+  --from-repofile=https://kevinpinscoe.github.io/rpm/kevinpinscoe.repo
+sudo rpm --import https://kevinpinscoe.github.io/rpm/gpg.key
+sudo dnf install bao-policy-editor
+bpe --version
+```
+
+That is the `dnf5` syntax used by Fedora 41 and later. On older `dnf4` systems the first
+command is `sudo dnf config-manager --add-repo https://kevinpinscoe.github.io/rpm/kevinpinscoe.repo`;
+`dnf5` rejects `--add-repo`.
+
+The signing key's fingerprint is `8CD9AAACEE8B5AFB7607BC2B300FD9BDDA1BF809` — the same key
+the APT repository uses. Compare it before trusting the key:
+
+```bash
+curl -fsSL https://kevinpinscoe.github.io/rpm/gpg.key | gpg --show-keys
+```
+
+The repository file sets `gpgcheck=1` and `repo_gpgcheck=1`, so `dnf` checks both the
+signature on every package and the signature on the repository metadata. To check a
+downloaded package yourself:
+
+```bash
+dnf download --arch="$(uname -m)" bao-policy-editor
+rpm --checksig bao-policy-editor_*.rpm   # expect: digests signatures OK
+```
+
+Upgrade and remove with `sudo dnf upgrade bao-policy-editor` and
+`sudo dnf remove bao-policy-editor`. Removal leaves nothing behind: the package owns only
+`/usr/bin/bpe`, and BPE writes no system-wide configuration.
+
+**If the metadata signature fails**, `dnf5` prints `repomd.xml GPG signature verification
+error` and *skips the repository* — the command can still exit `0`, and the package then
+simply cannot be found. Treat that message as a failure, not a warning.
+
+#### What was verified, and what was not
+
+Installation acceptance for v0.1.0 ran on 2026-10-15 in clean Fedora 42 and Fedora 43
+x86_64 containers against the live repository (FSM-22):
+
+- the repository file adds, the key imports, and its fingerprint matches;
+- `dnf` accepts the signed `repomd.xml` with `repo_gpgcheck=1`;
+- `dnf install`, `bpe --version` (0.1.0), `rpm -V`, and `rpm --checksig` on the served
+  package all pass;
+- `dnf upgrade` is a clean no-op at 0.1.0-1 — no newer version exists yet, so a real
+  upgrade has not been exercised;
+- `dnf remove` leaves no file on the system that was not there before installation;
+- an aarch64 client resolves the aarch64 package and an x86_64 client the x86_64 one —
+  checked with `dnf --forcearch`, because no aarch64 machine or emulator was used, so the
+  aarch64 package has not been *installed*;
+- a corrupted package (payload or header) fails `rpm --checksig` and `dnf` refuses it, an
+  unsigned package from a `gpgcheck=1` repository is refused, and a tampered `repomd.xml`
+  causes the repository to be skipped.
+
+This is **installation acceptance only**. It says nothing about the interactive editor in
+a Fedora terminal — screens, keyboard and mouse handling, terminal-mode restoration. That
+interactive acceptance test ([RUNBOOK.md](RUNBOOK.md) Step 15) is separate, is run by a
+person, and **has not passed on Fedora** (see [Supported platforms](#supported-platforms)).
 
 ### How a release is made
 
