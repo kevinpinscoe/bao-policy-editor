@@ -64,8 +64,9 @@ nfpms:
     priority: optional
     contents:
       # Debian requires every package to carry its copyright and licence notices.
-      # packaging/deb/copyright is DEP-5; it covers BPE and every Go module linked
-      # into bpe, so regenerate it whenever go.mod changes (RUNBOOK, Step 16).
+      # packaging/deb/copyright is DEP-5; it covers BPE, every Go module linked
+      # into bpe, and the Go standard library's third-party notices, so re-check
+      # it whenever go.mod or the release's Go version changes (RUNBOOK, Step 16).
       # deb only: the rpm already carries `License: MPL-2.0` in its header.
       - src: packaging/deb/copyright
         dst: /usr/share/doc/bao-policy-editor/copyright
