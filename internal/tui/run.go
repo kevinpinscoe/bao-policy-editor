@@ -43,9 +43,9 @@ type Options struct {
 //
 // It returns an *apperr.AppError, so the caller maps the outcome to an
 // exit code the same way every other bpe command does rather than
-// inventing a second convention for the TUI. Cancellation — Ctrl+C at the
-// signal level, or ctx being cancelled — comes back as
-// apperr.Interrupted() and exit 130.
+// inventing a second convention for the TUI. Cancellation — SIGINT or
+// SIGTERM, which cancel ctx in main, or ctx being cancelled any other way —
+// comes back as apperr.Interrupted() and exit 130.
 //
 // # Offline by construction
 //
@@ -85,11 +85,17 @@ func Run(ctx context.Context, opts Options) error {
 		StartRemote: opts.Remote,
 	})
 
+	// bpe handles SIGINT and SIGTERM itself, through ctx (cmd/bpe/main.go).
+	// Bubble Tea's own handler is switched off, because both would receive
+	// the same signal and race: Bubble Tea's QuitMsg could win and turn
+	// SIGTERM into exit 0, or its signal goroutine could block on its send
+	// after the event loop had returned on ctx, and hang shutdown (FSM-48).
 	program := tea.NewProgram(
 		model,
 		tea.WithContext(ctx),
 		tea.WithInput(input),
 		tea.WithOutput(output),
+		tea.WithoutSignalHandler(),
 	)
 
 	if _, err := program.Run(); err != nil {
