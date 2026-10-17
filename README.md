@@ -6,10 +6,12 @@ Bao Policy Editor (BPE) is an open-source terminal interface for creating, editi
 
 ## Status
 
-Experimental. The first published release is
-[**v0.1.0**](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0)
-(2026-10-15) — see [Build and Release](#build-and-release) for where it is published and
-how to verify it.
+Experimental. The current release is
+[**v0.1.1**](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.1)
+(2026-10-17); the first was
+[v0.1.0](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0)
+(2026-10-15). See [Build and Release](#build-and-release) for where releases are published
+and how to verify them.
 
 ## Purpose
 
@@ -100,7 +102,7 @@ connection, whatever `BAO_ADDR` and `BAO_TOKEN` are set to.
 
 BPE is a single static Go binary with no runtime dependencies. Continuous integration
 compiles it for each of these on every pull request, so a build regression on any of them
-fails the pull request rather than being discovered later. The v0.1.0 release ships all
+fails the pull request rather than being discovered later. Every release ships all
 four:
 
 | Operating system | Architecture | Status |
@@ -136,7 +138,7 @@ cleanly, not that the interactive editor behaves correctly in those terminals. T
 interactive acceptance test is still outstanding. The development-time checks above still
 run on Linux.
 
-On **Windows** treat it as untried. The binary compiles and is published in v0.1.0 — a
+On **Windows** treat it as untried. The binary compiles and is published in every release — a
 deliberate decision to ship it without acceptance testing rather than drop the target — and
 that is the whole of the claim. Terminal handling, the signal-derived cancellation path,
 and the atomic write with its permission preservation and hard-link detection all assume
@@ -822,20 +824,30 @@ OpenBao API ─────┘
 
 ## Build and Release
 
-The first release, [**v0.1.0**](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0),
-was published on 2026-10-15 from commit `33172a3` by the pipeline described below. Its
-signature, checksums and SBOMs were verified after publication.
+The current release, [**v0.1.1**](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.1),
+was published on 2026-10-17 from commit `555fbb2` by the pipeline described below. It fixes
+SIGTERM and SIGINT in the interactive editor, which could exit `0` or hang instead of
+exiting `130` (FSM-48), and it carries the `.deb` packaging corrections described under
+[Installing from the APT repository](#installing-from-the-apt-repository-debian-and-ubuntu).
+Its signature and certificate identity, checksums, SBOMs and all five channels were
+verified after publication.
+
+The first release, [v0.1.0](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0),
+was published on 2026-10-15 from commit `33172a3`. The release history is in
+[RUNBOOK.md](RUNBOOK.md) Step 16.
 
 ### Where releases are published
 
 One release run publishes to all five places at once. **Published** below means the
 artifact was confirmed present and correctly signed or hashed on the live channel after
-v0.1.0 went out. It does not mean installation through that channel has been tested — that
-is still to be done, and is tracked per channel.
+v0.1.1 went out. It does not mean installation through that channel has been tested — that
+is tracked per channel. **Installation verified** records the acceptance runs, all made
+against v0.1.0; none has been repeated for v0.1.1, so upgrading from 0.1.0 to 0.1.1 has
+not been tested through any channel.
 
-| Channel | Where | v0.1.0 | Installation verified |
+| Channel | Where | v0.1.1 | Installation verified (v0.1.0) |
 | --- | --- | --- | --- |
-| GitHub release | [releases/tag/v0.1.0](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | Published: four binaries, `.deb`/`.rpm`, SBOMs, signed checksums | Linux amd64 direct download, below, tested in bash and zsh; other platforms not yet |
+| GitHub release | [releases/tag/v0.1.1](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.1) | Published: four binaries, `.deb`/`.rpm`, SBOMs, signed checksums | Linux amd64 direct download, below, tested in bash and zsh; other platforms not yet |
 | Homebrew cask | [`kevinpinscoe/homebrew-tap`](https://github.com/kevinpinscoe/homebrew-tap), cask `bao-policy-editor` | Published: macOS arm64, Linux amd64/arm64 | Linux amd64, clean container, Homebrew 7.0.9 (FSM-20); macOS arm64 and Linux arm64 cask selection and checksums checked, not installed |
 | APT | [kevinpinscoe.github.io/apt](https://kevinpinscoe.github.io/apt), package `bao-policy-editor` | Published: amd64, arm64; signed index | Debian 12 and 13, Ubuntu 22.04 and 24.04 amd64, clean containers (FSM-21); arm64 package selection checked, not installed |
 | RPM | [kevinpinscoe.github.io/rpm](https://kevinpinscoe.github.io/rpm), package `bao-policy-editor` | Published: x86_64, aarch64; signed packages and metadata | Fedora 42 and 43 x86_64, clean containers (FSM-22); aarch64 package selection checked, not installed |
@@ -852,7 +864,7 @@ the binary on your `PATH`. For Linux amd64 — substitute `bpe-linux-arm64` or
 `bpe-darwin-arm64` as needed:
 
 ```bash
-VERSION=v0.1.0
+VERSION=v0.1.1
 ASSET=bpe-linux-amd64
 BASE="https://github.com/kevinpinscoe/bao-policy-editor/releases/download/${VERSION}"
 curl -fsSLO "${BASE}/${ASSET}"
@@ -875,7 +887,7 @@ On macOS use `shasum -a 256 --ignore-missing -c checksums.txt` in place of `sha2
 Windows, download `bpe-windows-amd64.zip`, check its SHA-256 against `checksums.txt`, and
 extract `bpe.exe`.
 
-`bpe --version` should print `0.1.0` and commit `33172a3ad2a169ae674cd893fe86eaa155d38783`.
+`bpe --version` should print `0.1.1` and commit `555fbb2d5689dee9fe3e51389b860ba8009e7a9e`.
 
 ### Installing with Homebrew (macOS and Linux)
 
@@ -940,7 +952,8 @@ Not verified:
 
 - **No native install on macOS or Linux arm64.** The macOS check was a cross-platform
   fetch, not an install on a Mac.
-- **No real upgrade.** v0.1.0 is the only release, so `brew upgrade` was a no-op.
+- **No real upgrade.** v0.1.0 was the only release at the time, so `brew upgrade` was a
+  no-op. The upgrade to v0.1.1 has not been tested.
 - **Re-running a release was not exercised.** The published cask was regenerated locally,
   byte for byte, with GoReleaser 2.17.1's own cask code from the released binaries. Read
   from GoReleaser's source, a re-run of an already-published tag fails at the asset upload,
@@ -1004,8 +1017,8 @@ x86_64 containers against the live repository (FSM-22):
 - `dnf` accepts the signed `repomd.xml` with `repo_gpgcheck=1`;
 - `dnf install`, `bpe --version` (0.1.0), `rpm -V`, and `rpm --checksig` on the served
   package all pass;
-- `dnf upgrade` is a clean no-op at 0.1.0-1 — no newer version exists yet, so a real
-  upgrade has not been exercised;
+- `dnf upgrade` was a clean no-op at 0.1.0-1 — no newer version existed then, and the
+  upgrade to 0.1.1 has not been tested;
 - `dnf remove` leaves no file on the system that was not there before installation;
 - an aarch64 client resolves the aarch64 package and an x86_64 client the x86_64 one —
   checked with `dnf --forcearch`, because no aarch64 machine or emulator was used, so the
@@ -1057,15 +1070,15 @@ Upgrade with `sudo apt-get install --only-upgrade bao-policy-editor`. Remove wit
 `sudo apt-get remove bao-policy-editor`, or `purge`. Removal leaves nothing behind: the
 package owns only `/usr/bin/bpe`, and BPE writes no system-wide configuration.
 
-**v0.1.0's `.deb` has two known packaging gaps.** Both are corrected on `main` for the
-next release, and v0.1.0 will not be republished. No corrected package has been published
-yet:
+**v0.1.0's `.deb` had two packaging gaps, corrected in v0.1.1.** v0.1.0 is not
+republished, so its `.deb`, still attached to its GitHub release, keeps them:
 
 - It ships no `/usr/share/doc/bao-policy-editor/copyright` file, so the package carries no
-  licence text. BPE is MPL-2.0; see [License](#license).
-- Its `Section:` field is empty.
+  licence text. BPE is MPL-2.0; see [License](#license). v0.1.1's `.deb` installs that file.
+- Its `Section:` field is empty. v0.1.1's is `admin`, with `Priority: optional`.
 
-Neither affects installing or running `bpe`.
+Neither affects installing or running `bpe`. Both corrections were checked in the published
+v0.1.1 packages for amd64 and arm64, and `Section: admin` in the live APT index.
 
 **Right after a release**, for up to ten minutes, `apt-get update` can report
 `Hash Sum mismatch` for this repository, or `apt-get install` can fail with a 404. GitHub
@@ -1137,8 +1150,8 @@ Ubuntu 22.04 and Ubuntu 24.04 amd64 containers against the live repository (FSM-
 - `apt-get install`, `bpe --version` (0.1.0), `dpkg --verify`, and `/usr/bin/bpe` at 0755
   all pass;
 - the served `.deb`'s SHA-256 matches the signed index;
-- `apt-get install --only-upgrade` is a clean no-op. No newer version exists yet, so a real
-  upgrade has not been exercised, and `dpkg --compare-versions` confirms the intended
+- `apt-get install --only-upgrade` was a clean no-op. No newer version existed then, and
+  the upgrade to 0.1.1 has not been tested; `dpkg --compare-versions` confirms the intended
   ordering;
 - `apt-get remove` and `purge` leave no file on the system that was not there before;
 - an arm64 client resolves the arm64 package. This was checked by running `apt` as an

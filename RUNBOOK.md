@@ -17,8 +17,8 @@ source_path: /home/kinscoe/Projects/public/bao-policy-editor/RUNBOOK.md
 | Field                 | Value                                                                                          |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
 | **Owner**             | Kevin Inscoe                                                                                   |
-| **Last Updated**      | 2026-10-16                                                                                     |
-| **Last Tested**       | 2026-10-15 — Step 16 run for v0.1.0; its code blocks re-tested in bash and zsh                 |
+| **Last Updated**      | 2026-10-17                                                                                     |
+| **Last Tested**       | 2026-10-17 — Step 16 run for v0.1.1                                                            |
 | **Expected Duration** | N/A                                                                                            |
 | **Risk Level**        | Medium                                                                                         |
 | **Repo**              | <https://github.com/kevinpinscoe/bao-policy-editor>                                            |
@@ -897,6 +897,7 @@ it is claimed here.
 | Version | Published | Commit | Publish run | Notes |
 | --- | --- | --- | --- | --- |
 | [`v0.1.0`](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.0) | 2026-10-15 | `33172a3` | [38747569146](https://github.com/kevinpinscoe/bao-policy-editor/actions/runs/38747569146) | First release. Signature, checksums, SBOMs and all five channels verified as published; channel installation not yet verified. macOS acceptance test passed (34/0/0); the Fedora acceptance test was **waived as a prerequisite and deferred, not passed** — it runs after RPM installation under FSM-22. RPM installation itself was verified in clean Fedora 42 and 43 x86_64 containers on 2026-10-15 (FSM-22); the interactive Fedora test is still deferred, not passed. The `.deb` carries an empty `Section` field, tracked under FSM-21 and left for a later release |
+| [`v0.1.1`](https://github.com/kevinpinscoe/bao-policy-editor/releases/tag/v0.1.1) | 2026-10-17 | `555fbb2` | [39043029955](https://github.com/kevinpinscoe/bao-policy-editor/actions/runs/39043029955) | SIGTERM and SIGINT now always exit 130 (FSM-48). Also carries the `.deb` copyright file, `Section: admin` and `Priority: optional` (FSM-21). The 14-asset manifest, checksums, the Sigstore identity with its repository, ref, trigger and workflow-commit claims, and all five channels were verified as published. The released Linux amd64 binary passed the signal regression and the baseline probe. Channel installation and upgrade from 0.1.0 have not been verified |
 
 #### If it fails partway
 
@@ -962,7 +963,7 @@ checked in nfpm's source (FSM-22).
 The `.deb` installs `packaging/deb/copyright` as `/usr/share/doc/bao-policy-editor/copyright`
 (`.goreleaser.yml`, `nfpms.contents`, deb only). The same nfpm block sets `section: admin`
 and `priority: optional`. v0.1.0 shipped neither the file nor a Section (FSM-19, FSM-21);
-both are fixed on `main` and reach users only with the next release.
+v0.1.1 ships both.
 
 The file is DEP-5 (`copyright-format/1.0`). It covers BPE (MPL-2.0), the Go standard
 library, and **every Go module linked into `bpe`**, one `Files` paragraph each, because a
