@@ -404,6 +404,19 @@ any file. To repeat it, run a `bao server -dev` on a loopback port, point
 — the interface is the thing under test, so there is no scripted form of
 it in the repository.
 
+Start that server so that it cannot touch your own `~/.vault-token`: give it
+an empty temporary `HOME` and `-dev-no-store-token`, and run every `bao`
+command against it with that same `HOME`. Without both, `bao server -dev`
+writes its throwaway root token to `$HOME/.vault-token`, replacing whatever
+token you had there (KSA-206):
+
+```bash
+dev_home=$(mktemp -d)
+HOME="$dev_home" bao server -dev -dev-no-store-token -dev-listen-address=127.0.0.1:8211
+```
+
+Remove `$dev_home` when you stop the server.
+
 **One thing that looks like a bug and is not.** A policy whose expiration
 came from a `ttl` reads back in the server's local offset until its first
 update, and in UTC afterwards — `…T16:29:20.691566319-04:00` becomes
@@ -561,7 +574,8 @@ That is the whole invocation. It takes no arguments and needs no configuration �
 
 **What it does:** starts a throwaway `bao server -dev` on `127.0.0.1`, runs the
 `livesmoke`-tagged tests in `internal/tui` against it, verifies every disposable policy was
-removed, and stops the server.
+removed, and stops the server. It never touches your own `~/.vault-token` (see the last
+guard below).
 
 **Expected output** ends with:
 
@@ -588,7 +602,31 @@ part worth reading before you run it, because a great many developer shells alre
 - kills only the process it started, by the pid it was given, through an `EXIT`/`INT`/`TERM`
   trap;
 - lists the policies afterwards and **fails the run** if a disposable one was left behind —
-  they die with the server either way, but a leftover means a test's cleanup did not run.
+  they die with the server either way, but a leftover means a test's cleanup did not run;
+- **never lets a `bao` process see your real `HOME`.** `bao server -dev` stores its root
+  token in `$HOME/.vault-token` unless told not to, and an earlier version of this script
+  replaced the developer's own token on every run (KSA-206). The server and every `bao`
+  command now run with `HOME` set to an empty directory inside the temporary work directory,
+  and the server also gets `-dev-no-store-token`. The script aborts if a token appears in
+  that directory anyway. It records your real `~/.vault-token`'s metadata (whether it
+  exists, its inode, size, mode, mtime and ctime, never its contents) at the start, and
+  **fails the run** if any of it differs at exit. `go test` keeps your real `HOME` for its
+  module and build caches; the Go code under test never reads a token file.
+
+**Regression test for that guarantee:**
+
+```bash
+bash scripts/live-smoke-home-isolation.test.sh
+```
+
+It checks the script statically: every `server -dev` passes `-dev-no-store-token`, and `bao`
+runs only through the isolated-`HOME` wrapper. Then it runs `live-smoke.sh` twice with `HOME`
+pointed at a stand-in directory, once holding a fake `~/.vault-token` and once with none. It
+fails unless the fake file is byte-identical with the same inode, mode and times, or still
+absent. It also checks that your real `~/.vault-token` is unchanged. Each run starts its own
+dev server on a free loopback port. Expected output ends with `# 9 passed, 0 failed`.
+`--rev <commit>` runs the same checks against a committed revision; against `fbfc5a5`, the
+last commit before the fix, it fails six checks, which shows the test can see the defect.
 
 The test file adds its own refusal on top: it skips unless `BPE_LIVE_ADDR` and
 `BPE_LIVE_TOKEN` are set, and then **parses** the address before a single request is made,
